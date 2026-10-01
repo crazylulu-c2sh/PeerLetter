@@ -1,0 +1,25 @@
+{
+  "name": "peerletter",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.18.0",
+  "type": "module",
+  "description": "Local agent mail over stdio MCP and shared SQLite",
+  "engines": { "node": ">=24.18.0" },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "check": "tsc --noEmit",
+    "stdio": "node src/stdio.ts",
+    "cli": "node src/cli.ts",
+    "prepublishOnly": "node -e \"throw new Error('PeerLetter is GitHub-only. Registry publishing is disabled.')\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.99.2",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  }
+}
