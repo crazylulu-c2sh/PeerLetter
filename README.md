@@ -15,7 +15,7 @@ git clone https://github.com/crazylulu-c2sh/PeerLetter.git ~/dev/PeerLetter
 # Or select one host: setup claude | setup codex | setup pi
 ```
 
-`setup` finds Node **24.18+** on PATH or in the usual nvm installation, pins its real absolute executable, and installs dependencies with **pnpm 11.18.0 / Corepack**, `--frozen-lockfile --ignore-scripts`. No build or dependency build approval is needed. If Node/pnpm is missing, it prints the required installation step and exits. Set `PEERLETTER_NODE=/absolute/path/to/node` to choose Node explicitly. Bash is required. Keep this checkout at the installed path; rerun setup after changing it or the Node installation.
+`setup` finds Node **24.18+** on PATH or in the usual nvm installation, pins its real absolute executable, and installs dependencies with **pnpm 10+ / Corepack** (pnpm switches itself to the `packageManager` version), `--frozen-lockfile --ignore-scripts`. No build or dependency build approval is needed. If Node/pnpm is missing, it prints the required installation step and exits. Set `PEERLETTER_NODE=/absolute/path/to/node` to choose Node explicitly. Bash is required. Keep this checkout at the installed path; rerun setup after changing it or the Node installation.
 
 Setup configures automatic wake and the PeerLetter skill **for your user across projects**. It prints installation checks, a workspace SQLite `doctor` result, private backup paths, possible project conflicts, and remaining host steps. Other settings remain intact. It uses a private directory catalog for Claude; nothing is uploaded or published.
 

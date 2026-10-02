@@ -28,11 +28,11 @@ if [[ -z $selected_node ]]; then printf '%s\n' 'Node 24.18+ is required. Install
 selected_node=$("$selected_node" -e 'console.log(require("node:fs").realpathSync(process.argv[1]))' "$selected_node")
 export PATH="$(dirname -- "$selected_node"):$PATH"
 if ! $uninstall && ! $preview; then
-  required_pnpm=$("$selected_node" -e 'console.log(require(process.argv[1]).packageManager.split("@")[1])' "$checkout/package.json")
+  # pnpm 10+ switches itself to the packageManager version, so any pnpm 10+ is enough.
   package_command=()
-  if command -v pnpm >/dev/null && [[ $(pnpm --version) == "$required_pnpm" ]]; then package_command=(pnpm)
+  if command -v pnpm >/dev/null && [[ $(pnpm --version 2>/dev/null) =~ ^([0-9]+)\. ]] && (( BASH_REMATCH[1] >= 10 )); then package_command=(pnpm)
   elif command -v corepack >/dev/null; then package_command=(corepack pnpm)
-  else printf 'Install pnpm %s or Corepack, then rerun setup.\n' "$required_pnpm" >&2; exit 1; fi
+  else printf 'Install pnpm 10+ or Corepack, then rerun setup.\n' >&2; exit 1; fi
   (cd -- "$checkout"; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; "${package_command[@]}" install --frozen-lockfile --ignore-scripts)
 fi
 arguments=(--client "$client" --node "$selected_node")
