@@ -10,7 +10,7 @@ description: Coordinate agents in one local project through PeerLetter mail and 
 1. Call `peerletter_whoami` from this host's MCP tools. This registers the connection; Codex's first call supplies its native thread ID and enables queue wake.
 2. Call `peerletter_peers` in the same workspace.
 3. Report your exact name, available peer names, `session_binding.state`, wake mode/error, and Claude's `wake_runner.online` when present. Explain any missing binding or watcher.
-4. Call `peerletter_receive` and process mail within the user's task. For a requested conversation, wait with `wait_ms=30000` up to four times for each expected answer. With an empty unsolicited wake, end the turn. Do not repeatedly poll or send pings without a conversation request.
+4. Call `peerletter_receive` and process mail within the user's task. For a requested conversation, wait with `wait_ms=30000` up to four times for each expected answer. With an empty unsolicited wake, continue any task already in progress; end the turn only if there is none. Do not repeatedly poll or send pings without a conversation request.
 
 Agent names are independent of runtime type; use the exact names returned by the tools. Never infer that every Codex session is called `codex`. An offline registered mailbox can still receive mail.
 
