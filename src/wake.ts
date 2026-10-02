@@ -15,6 +15,7 @@ export class MailWatcher {
   private send: (messages: Mail[]) => Promise<void | boolean>;
   private maintain?: () => Promise<void>;
   private before: () => void;
+  private currentStore?: () => Store;
   private backlog: boolean;
   private timer?: ReturnType<typeof setInterval>;
   private watcher?: fs.FSWatcher;
@@ -25,10 +26,11 @@ export class MailWatcher {
   private active?: Promise<void>;
 
   constructor(store: Store, actor: Actor, sink: string, send: (messages: Mail[]) => Promise<void | boolean>,
-    options: { backlog?: boolean; before?: () => void; maintain?: () => Promise<void> } = {}) {
+    options: { backlog?: boolean; before?: () => void; maintain?: () => Promise<void>; currentStore?: () => Store } = {}) {
     this.store = store; this.actor = actor; this.sink = sink; this.send = send;
     this.before = options.before || (() => store.touch(actor));
     this.maintain = options.maintain;
+    this.currentStore=options.currentStore;
     this.backlog = !!options.backlog;
   }
 
@@ -45,15 +47,19 @@ export class MailWatcher {
     this.active = (async () => {
       try {
         this.before();
+        this.store=this.currentStore?.() || this.store;
+        const actor={...this.actor},store=this.store;
         // Reading data_version also observes commits made by other SQLite connections.
         this.store.dataVersion();
         // Reconcile external pending signals even after receive/ACK empties the inbox.
         await this.maintain?.();
-        const messages = this.store.pendingNotices(this.actor, this.sink,this.backlog ? 0 : this.store.noticeBaseline(this.actor));
+        this.before();
+        if (actor.session_id !== this.actor.session_id || actor.runtime_id !== this.actor.runtime_id) return;
+        const messages = store.pendingNotices(actor, this.sink,this.backlog ? 0 : store.noticeBaseline(actor));
         if (!messages.length && !this.maintain) return;
         // false is a normal deferral or an adapter that manages its own receipts.
         if (messages.length && await this.send(messages) !== false)
-          this.store.markNotified(this.actor, this.sink, messages.map(m => m.id));
+          store.markNotified(actor, this.sink, messages.map(m => m.id));
         this.store.setWake(this.actor, this.sink);
         this.failures = 0; this.retryAt = 0;
       } catch (error) {

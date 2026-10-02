@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+checkout=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+usage() { printf '%s\n' 'Usage: setup claude|codex|pi|all [--preview]' '       setup --uninstall claude|codex|pi|all' 'Installs user settings with automatic wake. Existing unrelated settings are preserved.'; }
+if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then usage; exit 0; fi
+uninstall=false
+if [[ $1 == --uninstall ]]; then uninstall=true; shift; fi
+case ${1:-} in claude|codex|pi|all) client=$1; shift;; *) usage >&2; exit 1;; esac
+preview=false
+if [[ ${1:-} == --preview ]]; then preview=true; shift; fi
+if [[ $# != 0 ]]; then usage >&2; exit 1; fi
+compatible() { "$1" -e 'const [a,b,c]=process.versions.node.split(".").map(Number);process.exit(a>24 || a===24 && (b>18 || b===18 && c>=0) ? 0:1)' >/dev/null 2>&1; }
+selected_node=''
+if [[ -n ${PEERLETTER_NODE:-} ]]; then
+  if [[ $PEERLETTER_NODE != /* ]] || ! compatible "$PEERLETTER_NODE"; then printf '%s\n' 'PEERLETTER_NODE must be an absolute Node executable, version 24.18 or newer.' >&2; exit 1; fi
+  selected_node=$PEERLETTER_NODE
+else
+  while IFS= read -r candidate; do
+    if compatible "$candidate"; then selected_node=$candidate; break; fi
+  done < <(type -aP node 2>/dev/null || true)
+  if [[ -z $selected_node ]]; then
+    for candidate in "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/bin/node "$HOME"/.local/bin/node /usr/local/bin/node /usr/bin/node; do
+      if [[ -x $candidate ]] && compatible "$candidate"; then selected_node=$candidate; break; fi
+    done
+  fi
+fi
+if [[ -z $selected_node ]]; then printf '%s\n' 'Node 24.18+ is required. Install it, then rerun setup.' 'With nvm: nvm install 24.18.0 && nvm use 24.18.0' >&2; exit 1; fi
+selected_node=$("$selected_node" -e 'console.log(require("node:fs").realpathSync(process.argv[1]))' "$selected_node")
+export PATH="$(dirname -- "$selected_node"):$PATH"
+if ! $uninstall && ! $preview; then
+  required_pnpm=$("$selected_node" -e 'console.log(require(process.argv[1]).packageManager.split("@")[1])' "$checkout/package.json")
+  package_command=()
+  if command -v pnpm >/dev/null && [[ $(pnpm --version) == "$required_pnpm" ]]; then package_command=(pnpm)
+  elif command -v corepack >/dev/null; then package_command=(corepack pnpm)
+  else printf 'Install pnpm %s or Corepack, then rerun setup.\n' "$required_pnpm" >&2; exit 1; fi
+  (cd -- "$checkout"; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; "${package_command[@]}" install --frozen-lockfile --ignore-scripts)
+fi
+arguments=(--client "$client" --node "$selected_node")
+if $uninstall; then arguments+=(--uninstall); fi
+if $preview; then arguments+=(--preview); fi
+exec "$selected_node" "$checkout/scripts/global-install.ts" "${arguments[@]}"

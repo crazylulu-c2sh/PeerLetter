@@ -20,7 +20,9 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm run check
       - run: pnpm test
+      - name: Verify native Pi global extension and idle wake without project trust
+        run: pnpm run test:native-pi
       - name: Verify native Codex thread binding with a local fixture
         run: pnpm --package=@openai/codex@0.160.0 dlx -c 'node scripts/native-codex-test.ts'
       - name: Verify native interactive Codex queue behavior with a local fixture
-        run: pnpm --package=@openai/codex@0.160.0 dlx -c 'node scripts/native-codex-queue-test.ts'
+        run: pnpm --package=@openai/codex@0.160.0 dlx -c 'node scripts/native-codex-queue-test.ts --global'

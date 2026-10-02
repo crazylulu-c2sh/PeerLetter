@@ -50,14 +50,17 @@ export function hostProcess(kind: string): ProcessInfo | undefined {
   return list.find(p => agentKind(p.name) === kind) || list[0];
 }
 
-export function claudeSession(): { session_id?: string; cwd?: string } | undefined {
-  if (process.env.CLAUDE_CODE_SESSION_ID) return { session_id: process.env.CLAUDE_CODE_SESSION_ID };
-  const home = process.env.PEERLETTER_CLAUDE_HOME || path.join(process.env.HOME || "", ".claude");
-  for (const p of ancestors()) {
+export function claudeSession(): { session_id?: string; cwd?: string; host_pid?: number; updated_at?: number } | undefined {
+  const home = process.env.PEERLETTER_CLAUDE_HOME || process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || "", ".claude");
+  // The inherited environment is a startup snapshot. /resume and /clear keep
+  // subprocesses alive, while Claude updates the registry for its own host PID.
+  for (const p of ancestors().filter(p => agentKind(p.name) === "claude")) {
     try {
-      const data = JSON.parse(fs.readFileSync(path.join(home, "sessions", `${p.pid}.json`), "utf8"));
-      if (typeof data.sessionId === "string") return { session_id: data.sessionId, cwd: data.cwd };
+      const file=path.join(home,"sessions",`${p.pid}.json`);
+      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (typeof data.sessionId === "string") return { session_id: data.sessionId,
+        cwd: typeof data.cwd === "string" ? data.cwd : undefined, host_pid: p.pid,updated_at:fs.statSync(file).mtimeMs };
     } catch { /* Registry is optional; no tokens or socket details are read. */ }
   }
-  return undefined;
+  return process.env.CLAUDE_CODE_SESSION_ID ? {session_id:process.env.CLAUDE_CODE_SESSION_ID} : undefined;
 }

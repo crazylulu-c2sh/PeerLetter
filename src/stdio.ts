@@ -4,9 +4,9 @@ import { z } from "zod";
 import { Runtime, startupRegistration } from "./runtime.ts";
 import type { HostBinding } from "./runtime.ts";
 import { parseOptions } from "./options.ts";
-import { MailError, errorResult } from "./errors.ts";
+import { MailError, errorResult, validUuid } from "./errors.ts";
 import { MailWatcher, noticeText } from "./wake.ts";
-import { CodexQueue } from "./codex.ts";
+import { CodexQueue, CodexConnection } from "./codex.ts";
 import { configuredClaudeWake } from "./claude.ts";
 
 const instructions = `PeerLetter connects agents in one local workspace. Check your inbox at task start,
@@ -41,6 +41,10 @@ let initialized = false;
 let startupRetry: ReturnType<typeof setTimeout> | undefined;
 let startupFailures = 0;
 let startupError = "";
+let hostRefresh: ReturnType<typeof setInterval> | undefined;
+let projectLookup: Promise<void> | undefined;
+let projectThread: string | undefined;
+let refreshError="";
 const stopped = new AbortController();
 
 server.server.oninitialized = () => {
@@ -58,6 +62,17 @@ function join(meta?: Record<string,unknown>, recoverySession?: string, startup?:
     if (startupRetry) clearTimeout(startupRetry);
     startupRetry = undefined;
     const active = candidate;
+    if (active.actor.kind === "claude" && wake !== "none") {
+      hostRefresh=setInterval(()=>{
+        try { active.refresh();refreshError=""; }
+        catch(error) {
+          const detail=JSON.stringify(errorResult(error));
+          if (detail !== refreshError) console.error(`PeerLetter host refresh: ${detail}`);
+          refreshError=detail;
+        }
+      },750);
+      hostRefresh.unref();
+    }
     if (wake === "claude-channel" || wake === "codex-queue") {
       if (wake === "codex-queue") codexQueue = new CodexQueue(active.store,active.actor,()=>active.codexTarget());
       watcher = new MailWatcher(active.store, active.actor, wake, async messages => {
@@ -67,7 +82,7 @@ function join(meta?: Record<string,unknown>, recoverySession?: string, startup?:
           if ((configuredClaudeWake(active.store.project.cwd) ?? wake) !== wake) throw new MailError("WAKE_DISABLED","Claude wake mode changed; reload its MCP/plugin configuration.");
           await server.server.notification({ method: "notifications/claude/channel", params: { content } });
         } else return codexQueue!.signal(messages);
-      }, { backlog: options.wakeBacklog, before: () => active.refresh(),
+      }, { backlog: options.wakeBacklog, before: () => active.refresh(),currentStore:()=>active.store,
         ...(codexQueue ? {maintain:()=>codexQueue!.reconcile()} : {}) });
       watcher.start();
     }
@@ -95,12 +110,37 @@ function current(meta?: Record<string,unknown>, recoverySession?: string): Runti
   runtime.observeRequest(meta);
   runtime.refresh(); return runtime;
 }
+async function callingProject(meta?: Record<string,unknown>, recovery?: string): Promise<void> {
+  if (runtime || options.project || process.env.PEERLETTER_PROJECT || (options.kind && options.kind !== "codex")) return;
+  const kind=options.kind || server.server.getClientVersion()?.name || "";
+  if (!kind.toLowerCase().includes("codex")) return;
+  const candidate=meta?.threadId ?? recovery;
+  if (candidate === undefined) throw new MailError("UNBOUND_SESSION","Global Codex needs the calling thread's native metadata to choose its workspace. Call whoami from Codex, or explicitly bind your own thread ID; use --project for a project-pinned integration.");
+  const thread=validUuid(String(candidate),"INVALID_THREAD_ID");
+  if (projectThread && projectThread !== thread) throw new MailError("SESSION_MISMATCH","Project lookup belongs to another calling Codex thread.");
+  projectThread=thread;
+  // A global MCP can be spawned by a shared daemon whose cwd is unrelated to
+  // the caller. Read only that native thread's metadata, without resuming it.
+  projectLookup ||= (async()=>{
+    const connection=new CodexConnection();
+    try {
+      const result=await connection.call("thread/read",{threadId:thread,includeTurns:false});
+      if (result.thread?.id !== thread || typeof result.thread.cwd !== "string" || !result.thread.cwd)
+        throw new MailError("INVALID_PROJECT","Codex did not return the calling thread's working directory.");
+      options.project=result.thread.cwd;
+    } finally {connection.close();}
+  })();
+  try { await projectLookup; }
+  catch(error) {projectThread=undefined;throw error;}
+  finally {projectLookup=undefined;}
+}
 function tool(name: string, description: string, schema: z.ZodRawShape, fn: (args: any, r: Runtime, signal: AbortSignal) => unknown,
   readOnly = false) {
   server.registerTool(name, { description, inputSchema: schema,
     annotations: { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
   async (args, extra) => {
     try {
+      await callingProject(extra._meta,name === "peerletter_bind_session" ? args.session_id : undefined);
       const r = current(extra._meta,name === "peerletter_bind_session" ? args.session_id : undefined);
       const result = await fn(args, r, AbortSignal.any([extra.signal, stopped.signal]));
       if (codexQueue && (name === "peerletter_receive" || name === "peerletter_ack")) {
@@ -147,6 +187,7 @@ async function shutdown(code = 0): Promise<void> {
   if (closing) return;
   closing = true; stopped.abort();
   if (startupRetry) clearTimeout(startupRetry);
+  if (hostRefresh) clearInterval(hostRefresh);
   startupRetry = undefined;
   await watcher?.stop();
   codexQueue?.close();

@@ -10,15 +10,19 @@ import assert from "node:assert/strict";
 import { CodexConnection } from "../src/codex.ts";
 import { Store } from "../src/store.ts";
 import { resolveProject } from "../src/project.ts";
+import { applyGlobal } from "./global-install.ts";
+import type { Agent } from "../src/store.ts";
 
 // Installed interactive TUI + app-server; every model response comes from loopback.
 // Only this temporary project's mailbox, control socket and child processes are used.
 const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-native-queue-"));
 const project=path.join(root,"project"),testHome=path.join(root,"codex"),state=path.join(root,"state"),socket=path.join(root,"daemon.sock");
 fs.mkdirSync(project);fs.mkdirSync(testHome);
+const globalSetup=process.argv.includes("--global");
 const checkout=fileURLToPath(new URL("../",import.meta.url)),binary=process.env.PEERLETTER_CODEX_BIN || "codex";
 const store=new Store(resolveProject(project,state)),sender=store.register({name:"fixture-sender",kind:"cli",session_id:`cli:${randomUUID()}`});
 let requests=0,backgroundRequests=0,providerError:Error|undefined,tuiOutput="",serverErrors="",trustAccepted=false;
+let hooksAccepted=false;
 let releaseRead=()=>{},releaseUnread=()=>{};
 const waitRead=new Promise<void>(resolve=>{releaseRead=resolve;}),waitUnread=new Promise<void>(resolve=>{releaseUnread=resolve;});
 let ackIds:string[]=[],sawUnreadNotice=false,sawIdleNotice=false;
@@ -57,6 +61,12 @@ await new Promise<void>(resolve=>provider.listen(0,"127.0.0.1",resolve));
 const port=(provider.address() as {port:number}).port;
 fs.writeFileSync(path.join(testHome,"config.toml"),`model = "peerletter-fixture"\nmodel_provider = "peerletter_fixture"\napproval_policy = "never"\n[analytics]\nenabled = false\n[features]\ncode_mode = false\ncode_mode_only = false\n[model_providers.peerletter_fixture]\nname = "Local PeerLetter fixture"\nbase_url = "http://127.0.0.1:${port}/v1"\nwire_api = "responses"\nrequires_openai_auth = false\nsupports_websockets = false\n[mcp_servers.peerletter]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify([path.join(checkout,"src/stdio.ts"),"--project",project,"--state",state,"--kind","codex","--name","codex-fixture","--wake","codex-queue"])}\n[mcp_servers.peerletter.env]\nPEERLETTER_CODEX_SOCKET = ${JSON.stringify(socket)}\n`);
 const env:NodeJS.ProcessEnv={...process.env,CODEX_HOME:testHome,TERM:"xterm-256color"};
+if (globalSetup) {
+  const config=path.join(testHome,"config.toml");
+  fs.writeFileSync(config,fs.readFileSync(config,"utf8").split("[mcp_servers.peerletter]")[0]);
+  applyGlobal({client:"codex",home:path.join(root,"user"),codexHome:testHome});
+  Object.assign(env,{HOME:path.join(root,"user"),PEERLETTER_STATE_DIR:state,PEERLETTER_CODEX_SOCKET:socket});
+}
 for(const name of ["CODEX_THREAD_ID","PEERLETTER_SESSION_ID","PEERLETTER_NAME","PEERLETTER_WAKE","OPENAI_API_KEY","CODEX_API_KEY"])delete env[name];
 const server=spawn(binary,["app-server","--listen",`unix://${socket}`],{env,stdio:["ignore","ignore","pipe"]});
 server.stderr.on("data",b=>{serverErrors=(serverErrors+String(b)).slice(-5000);});
@@ -105,10 +115,15 @@ finally:
     tuiOutput=(tuiOutput+String(b)).slice(-64000);
     const plain=tuiOutput.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,"");
     if(!trustAccepted && /trust|Yes, continue/.test(plain)) {trustAccepted=true;setTimeout(()=>tui?.stdin?.write("1\r"),1000);}
+    // This fixture created these four hooks under its temporary CODEX_HOME.
+    // Use the host's normal review UI; no production hook approval is changed.
+    if(globalSetup && !hooksAccepted && /hooks are new or changed/.test(plain)) {
+      hooksAccepted=true;setTimeout(()=>tui?.stdin?.write("2\r"),1000);
+    }
   });
   tui.stderr!.on("data",b=>{tuiOutput=(tuiOutput+String(b)).slice(-64000);});
   await eventually(()=>requests === 2,"Interactive identity and held busy turn",30000);
-  const actor=store.agent("codex-fixture")!;assert.ok(actor);const threadId=actor.session_id;
+  const actor=globalSetup ? store.get<Agent>("SELECT * FROM agents WHERE kind='codex' AND online=1")! : store.agent("codex-fixture")!;assert.ok(actor);const threadId=actor.session_id;
   const status=()=>rpc.call("thread/read",{threadId,includeTurns:false});
   const queued=()=>rpc.call("thread/queue/list",{threadId,limit:100});
   const mail=(key:string,body:string)=>store.send(sender,{to:actor.name,text:body,idempotency_key:key}).message;
@@ -129,7 +144,7 @@ finally:
   const idle=mail("idle-wake","SECRET-IDLE-BODY");
   await eventually(async()=>requests === 7 && sawIdleNotice && (await status()).thread.status.type === "idle","Native idle wake");
   assert.equal(store.status(sender,idle.id).state,"notified");await new Promise(resolve=>setTimeout(resolve,1000));assert.equal(requests,7);
-  console.log(JSON.stringify({passed:true,client:"installed interactive Codex TUI and app-server",busy_read_extra_turns:0,
+  console.log(JSON.stringify({passed:true,client:"installed interactive Codex TUI and app-server",global_setup:globalSetup,busy_read_extra_turns:0,
     busy_unread_native_wakes:1,idle_native_wakes:1,binding:"mcp-metadata",provider:"loopback fixture",provider_requests:requests,background_requests:backgroundRequests,external_model_requests:0}));
 }finally {
   releaseRead();releaseUnread();rpc.close();await stop(tui);await stop(server);

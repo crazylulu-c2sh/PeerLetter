@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Store } from "./store.ts";
 import type { Agent } from "./store.ts";
 import { resolveProject } from "./project.ts";
-import { agentKind, ancestors, isProcessAlive } from "./process.ts";
+import { agentKind, ancestors, isProcessAlive, claudeSession } from "./process.ts";
 import { MailError, validName, validUuid } from "./errors.ts";
 import { configuredClaudeWake } from "./claude.ts";
 import { noticeText } from "./wake.ts";
@@ -22,17 +22,18 @@ function stdout(line: string): Promise<void> {
 // Attach to an existing bound, live MCP actor. Never register a mailbox, ACK,
 // touch presence, close the MCP participant or change its leases.
 export async function watchMail(options: WatchOptions): Promise<boolean> {
-  const session=validUuid(options.session || process.env.CLAUDE_CODE_SESSION_ID || "","INVALID_SESSION_ID");
+  let session=validUuid(options.session || claudeSession()?.session_id || "","INVALID_SESSION_ID");
   if (options.name) validName(options.name);
   const sink=options.sink || "claude-monitor",token=randomUUID();
   const timeout=options.timeoutMs ?? 0;
   if (!Number.isSafeInteger(timeout) || timeout < 0 || timeout > 86400000) throw new MailError("INVALID_ARGUMENT","timeout-ms must be 0–86400000.");
   const deadline=timeout ? Date.now()+timeout : Infinity;
-  const project=resolveProject(options.project,options.state);
+  let project=resolveProject(options.project || claudeSession()?.cwd,options.state);
   const emit=options.emit || stdout;
   const diagnostic=options.diagnostic || ((message:string)=>console.error(`PeerLetter watch: ${message}`));
   let store:Store|undefined,claimed=false,notified=false,actor:Agent|undefined;
   const parent=ancestors().find(p=>agentKind(p.name) === "claude");
+  const follow=!!parent && !options.session && sink === "claude-monitor";
   let host=parent ? {pid:parent.pid,start:parent.start} : undefined;
   let failures=0,lastError="";
   const report=(error:unknown)=> {
@@ -45,6 +46,20 @@ export async function watchMail(options: WatchOptions): Promise<boolean> {
       try {
         store ||= new Store(project);
         if (host && !isProcessAlive(host.pid,host.start)) return notified;
+        if (follow) {
+          const registry=claudeSession();
+          const mapping=store.hostSession("claude",parent!.pid);
+          const newer=registry?.host_pid === parent!.pid && (registry.updated_at || 0) > (mapping?.updated_at || 0);
+          const mapped=newer ? undefined : mapping?.session_id;
+          const next=mapped || (registry?.host_pid === parent!.pid ? registry.session_id : undefined);
+          if (next && next !== session) {
+            validUuid(next,"INVALID_SESSION_ID");
+            const nextProject=resolveProject(options.project || registry?.cwd || project.cwd,options.state);
+            if (claimed) store.releaseWatch(session,token);
+            claimed=false; actor=undefined; session=next;
+            if (nextProject.key !== project.key) {store.close();store=new Store(nextProject);project=nextProject;}
+          }
+        }
         if (!claimed) {
           if (!store.claimWatch(session,sink,token)) return false;
           claimed=true;
@@ -52,7 +67,13 @@ export async function watchMail(options: WatchOptions): Promise<boolean> {
         if (!store.ownsWatch(session,token)) return notified;
         const configured=configuredClaudeWake(project.cwd);
         if (configured !== undefined && configured !== sink) return notified;
-        if (store.gate(session).blocked_reasons.includes("session_end")) return notified;
+        if (store.gate(session).blocked_reasons.includes("session_end")) {
+          if (!follow) return notified;
+          // /resume and /clear have a SessionEnd -> SessionStart gap. Stay
+          // alive with the same host, but do not emit into the ended session.
+          await delay(options.pollMs ?? 750,undefined,{signal:options.signal});
+          continue;
+        }
         actor=store.agentForSession(session,"claude");
         if (actor && parent && actor.host_pid !== parent.pid) throw new MailError("SESSION_MISMATCH","The registered session belongs to another Claude host; watch will not inject into this one.");
         if (actor?.host_pid) {

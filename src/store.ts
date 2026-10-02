@@ -171,12 +171,21 @@ export class Store {
     if (owner) throw new MailError("SESSION_IN_USE",`Host session is already owned by online agent ${owner.name}; close that MCP connection before reconnecting.`);
   }
 
-  register(input: { name?: string; kind: string; session_id: string; pid?: number; host_pid?: number; wake?: string; session_source?: string }): Agent {
+  register(input: { name?: string; kind: string; session_id: string; pid?: number; host_pid?: number; wake?: string; session_source?: string; replace?: Agent }): Agent {
     if (input.name) validName(input.name);
     validName(input.kind);
     validSession(input.session_id);
     return this.transaction(() => {
       this.cleanPresence();
+      if (input.replace) {
+        const old=this.assertActor(input.replace);
+        if (old.kind !== "claude" || input.kind !== "claude" || !old.host_pid
+          || input.host_pid !== old.host_pid || !isProcessAlive(old.host_pid,old.host_start)) {
+          throw new MailError("SESSION_MISMATCH","Only the same live Claude host can replace its participant.");
+        }
+        this.run("UPDATE agents SET online=0,last_seen=? WHERE name=? AND runtime_id=?",Date.now(),old.name,old.runtime_id);
+        this.run("DELETE FROM leases WHERE owner=? AND owner_session=?",old.name,old.session_id);
+      }
       const source = input.session_source || (/^(runtime|cli):/.test(input.session_id) ? "unbound" : "configured");
       const bound = hasHostSession(input.kind,input.session_id,source);
       let name = input.name || input.kind;
@@ -262,10 +271,15 @@ export class Store {
 
   sessionFor(kind: string, pids: number[]): string | undefined {
     for (const pid of pids) {
-      const row = this.get<{ host_start: string | null; session_id: string }>("SELECT * FROM sessions WHERE kind=? AND host_pid=?", kind, pid);
-      if (row && isProcessAlive(pid, row.host_start)) return row.session_id;
+      const row = this.hostSession(kind,pid);
+      if (row) return row.session_id;
     }
     return undefined;
+  }
+
+  hostSession(kind: string, pid: number) {
+    const row=this.get<{host_start:string|null;session_id:string;cwd:string;updated_at:number}>("SELECT * FROM sessions WHERE kind=? AND host_pid=?",kind,pid);
+    return row && isProcessAlive(pid,row.host_start) ? row : undefined;
   }
 
   agentForSession(session: string, kind?: string): Agent | undefined {

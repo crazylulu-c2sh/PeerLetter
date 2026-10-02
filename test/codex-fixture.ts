@@ -7,14 +7,14 @@ export async function codexDaemon(t: TestContext, root: string, thread: string) 
   const socket = path.join(root,"daemon.sock"), server = http.createServer();
   const ws = new WebSocketServer({server});
   const calls: {method:string;params:any}[] = [], queued: any[] = [];
-  const state = { status:"idle", deletes:0, additions:0 };
+  const state = { status:"idle", deletes:0, additions:0, cwd:root };
   ws.on("connection",connection=>connection.on("message",data=>{
     const request = JSON.parse(String(data));
     if (!request.id) return;
     const {method,params,id} = request; calls.push({method,params});
     let result: any;
     if (method === "initialize") result = {};
-    else if (method === "thread/read") result = {thread:{id:thread,status:{type:state.status}}};
+    else if (method === "thread/read") result = {thread:{id:thread,cwd:state.cwd,status:{type:state.status}}};
     else if (method === "thread/queue/list") result = {data:queued,nextCursor:null};
     else if (method === "thread/queue/add") {
       const row = {id:`queue-${++state.additions}`,clientUserMessageId:params.clientUserMessageId,input:params.input};

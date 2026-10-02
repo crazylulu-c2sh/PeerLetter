@@ -10,6 +10,8 @@
     "test": "node --test test/*.test.ts",
     "test:native-codex": "node scripts/native-codex-test.ts",
     "test:native-codex-queue": "node scripts/native-codex-queue-test.ts",
+    "test:native-pi": "node scripts/native-pi-test.ts",
+    "test:native-global-setup": "node scripts/native-global-setup-test.ts",
     "test:native-claude": "python3 scripts/native-claude-test.py",
     "check": "tsc --noEmit",
     "stdio": "node src/stdio.ts",

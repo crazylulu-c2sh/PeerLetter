@@ -3,25 +3,59 @@
 [![English](https://img.shields.io/badge/lang-English-blue)](README.md)
 [![한국어](https://img.shields.io/badge/lang-%ED%95%9C%EA%B5%AD%EC%96%B4-red)](README.ko.md)
 
-> 이 문서는 [README.md](README.md)의 한국어판입니다. 내용이 다르면 README.md를 기준으로 합니다. 기준 커밋: `479bee0`.
+> 이 문서는 [README.md](README.md)의 한국어판입니다. 내용이 다르면 README.md를 기준으로 합니다. 전역 설치와 Claude 세션 전환 개선을 함께 반영했습니다.
 
 같은 로컬 작업 공간에서 일하는 에이전트들이 **stdio MCP + 공유 SQLite**로 메일을 주고받습니다. 메일은 디스크에 남습니다. 클라이언트마다 자기 프로세스를 띄우므로, 리스너·포트·토큰 서비스·Pi 호스트가 필요 없습니다.
 
 이 저장소는 **pnpm을 쓰는 GitHub clone 기반 테스트**용입니다. 레지스트리와 마켓플레이스 배포는 막혀 있습니다. Node **24.18 이상**이 TypeScript 소스를 바로 실행하므로 빌드가 필요 없습니다.
 
-## 설치와 확인
+## 사용자 전역 설치
 
 ```bash
 git clone https://github.com/crazylulu-c2sh/PeerLetter.git ~/dev/PeerLetter
+~/dev/PeerLetter/setup all
+# 하나만 고르려면: setup claude | setup codex | setup pi
+```
+
+`setup`은 PATH와 일반적인 nvm 설치에서 Node **24.18 이상**을 찾아 실제 절대 경로를 고정합니다. **pnpm 11.18.0 또는 Corepack**으로 `--frozen-lockfile --ignore-scripts` 설치를 수행합니다. 빌드나 의존성 빌드 승인은 필요 없습니다. Node·pnpm이 없으면 설치 방법을 출력하고 종료합니다. `PEERLETTER_NODE=/absolute/path/to/node`로 Node를 직접 고를 수도 있습니다. Bash가 필요합니다. 설치된 체크아웃 경로를 유지하고, 경로나 Node 설치가 바뀌면 setup을 다시 실행하세요.
+
+사용자의 **모든 프로젝트에서** 쓸 깨우기와 PeerLetter skill을 설치합니다. 설치 확인, 작업 공간 SQLite `doctor` 결과, 비공개 백업 경로, 현재 디렉토리의 기존 프로젝트 설정 충돌, 호스트에서 마칠 단계를 출력합니다. 관계없는 설정은 보존합니다. Claude에는 비공개 디렉토리 카탈로그를 쓰며, 업로드나 배포는 하지 않습니다.
+
+| 호스트 | 사용자 설정 | 기본 깨우기 | 호스트에서 마칠 단계 |
+|---|---|---|---|
+| Claude | `~/.claude/peerletter-plugin`, 사용자 플러그인 등록, `~/.claude/peerletter.json` | `claude-monitor` | 플러그인·작업 공간 신뢰 승인. 첫 설치는 다시 불러오기, 기존 MCP 런타임 업데이트는 재시작. `whoami.wake_runner.online` 확인. |
+| Codex | `~/.codex/config.toml`, `~/.codex/hooks.json`, `~/.agents/skills/peerletter` | `codex-queue` | `/hooks` 검토 후 MCP 재연결 또는 새 세션. Codex에게 PeerLetter 사용을 요청해 첫 whoami로 실제 thread 연결. |
+| Pi | `~/.pi/agent/settings.json`, Node 경로를 고정한 확장, skill 경로 | `pi-extension` | `/reload` 또는 재시작. 사용자 확장·skill은 프로젝트 신뢰 전에 로드되며 프로젝트 리소스 신뢰는 별도. Pi 자체도 Node 24.18 이상 필요. |
+
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, `XDG_STATE_HOME`으로 기본 경로를 바꿀 수 있습니다. 설치 소유권은 `$XDG_STATE_HOME/peerletter/installation.json`에 기록합니다. 기본은 `~/.local/state/peerletter/installation.json`입니다. 프로젝트와 참가자 이름은 고정하지 않으며, 실행 중인 각 세션의 작업 디렉토리·Git 루트에 참여합니다. Codex는 기존 로컬 앱서버 소켓으로 호출한 실제 thread의 cwd만 읽습니다. 소켓에 연결할 수 없으면 데몬의 cwd를 선택하지 않고 오류를 보고합니다. 다른 통합을 위한 프로젝트 고정 설치는 아래에 남아 있습니다.
+
+에이전트들을 **같은 프로젝트**에서 열고 이렇게 요청하세요.
+
+> PeerLetter 사용해서 다른 에이전트와 통신해줘.
+>
+> Use PeerLetter to communicate with the other agents.
+
+skill은 **whoami → peers**를 호출하고 실제 이름·참가자·세션 연결·깨우기 상태를 보고한 뒤 메일을 받습니다. 첫 whoami는 **에이전트가 호출하는 MCP 도구**이며 셸의 `whoami` 명령이 아닙니다. Codex는 새 MCP 연결마다 첫 호출이 필요합니다. 전역 설치만으로 공유 데몬의 thread를 알아낼 수는 없습니다. `/mcp`는 상태만 보여 주며 서버를 재시작하지 않습니다. Codex 0.160.0에서는 TUI 종료, 의도적인 공유 앱서버 데몬 재시작, 같은 thread resume으로 MCP를 다시 연결할 수 있습니다. 데몬 재시작은 다른 클라이언트 연결도 끊습니다.
+
+기존 프로젝트 로컬 PeerLetter 설정은 전역 설정을 덮거나 경쟁할 수 있습니다. setup은 현재 디렉토리의 관련 파일을 안내하지만 프로젝트를 수정하거나 다른 체크아웃들을 검색하지 않습니다. 전환 전에 백업하고, 기존 PeerLetter MCP·플러그인·훅·확장·skill 항목만 제거하거나 비활성화하세요. 다른 설정은 유지하세요. 이전에 설치한 다른 프로젝트도 확인하세요. 프로젝트 `.claude/peerletter.json`에 `none`이 남으면 전역 monitor를 멈출 수 있으므로, 전환할 때 이 소유 설정 파일도 갱신하거나 제거하세요. 같은 세션에 PeerLetter MCP를 두 개 실행하지 마세요.
+
+```bash
+~/dev/PeerLetter/setup all --preview         # 의존성·설정 변경 없이 미리 보기
+~/dev/PeerLetter/setup --uninstall all      # 또는 claude, codex, pi
+```
+
+삭제는 소유한 MCP·훅·확장·skill 항목과 사용자 Claude 플러그인·카탈로그를 제거하며, 나중에 추가한 다른 설정은 보존합니다. 실행 중인 Claude monitor는 먼저 멈춥니다. 이미 떠 있는 MCP 연결은 호스트를 다시 불러오거나 재시작해 끊으세요. 백업은 비공개로 남습니다. 편집된 생성 파일은 보존하고 보고하며, 관리 중인 Codex 블록을 편집했다면 삭제 전에 검토해야 합니다. 과거 전체 설정으로 나중의 사용자 변경을 덮어쓰지 않습니다. 설치·삭제는 작업 공간 DB의 메일이나 lease를 삭제하지 않습니다.
+
+### 체크아웃 검증·개발
+
+```bash
 cd ~/dev/PeerLetter
-pnpm install --frozen-lockfile
+pnpm install --frozen-lockfile --ignore-scripts
 pnpm run check
 pnpm test
 ```
 
-`packageManager`에 pnpm 11.18.0이 고정되어 있습니다. 설치된 pnpm이나 Corepack으로 이 버전을 사용하세요.
-- 런타임 의존성은 MCP SDK와 Zod입니다. SQLite는 Node에 내장되어 있습니다.
-- Pi 패키지는 선택형 확장의 API를 검사하기 위한 개발 의존성입니다.
+런타임 의존성은 MCP SDK·Zod·`ws`입니다. SQLite는 Node에 내장되어 있습니다. Pi SDK는 확장 검사에 쓰는 개발 의존성입니다. 레지스트리 배포는 꺼져 있습니다.
 
 ## 이미 실행 중인 에이전트로 테스트
 
@@ -56,7 +90,7 @@ MAIL=/path/to/project/output/peerletter-test/peerletter
 
 이미 떠 있는 호스트 세션은 이 CLI를 바로 쓸 수 있습니다. 새 MCP 도구를 쓰려면 Codex·Claude는 새 세션을 열거나 호스트의 재연결 절차를 거쳐야 하고, Pi는 `/reload`를 쓰면 됩니다.
 
-## 새 MCP 세션 연결
+## 프로젝트 로컬 설치 (선택)
 
 설치 스크립트는 **프로젝트 로컬** 설정을 미리 보여 줍니다. 다른 서버 항목, 설정, 훅 처리기는 그대로 둡니다. 생성될 파일을 검토한 뒤 적용합니다.
 
@@ -202,7 +236,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
   --client claude --wake monitor --apply
 ```
 
-설치 스크립트는 MCP 서버, skill, 생명주기 훅, `experimental.monitors` 항목을 담은 비공개 로컬 Claude 플러그인을 생성합니다.
+**프로젝트 로컬** 설치 스크립트는 MCP 서버, skill, 생명주기 훅, `experimental.monitors` 항목을 담은 비공개 로컬 Claude 플러그인을 생성합니다.
 - 로컬 디렉토리 카탈로그를 등록하고 플러그인을 **local scope**로 설치합니다. 이 사용자의 이 프로젝트에서만 켜집니다.
 - 아무것도 업로드하거나 배포하지 않습니다.
 - 플러그인은 이 체크아웃에 설치된 의존성과 Node 절대 경로를 씁니다. 의존성은 계속 pnpm으로 관리하세요.
@@ -210,7 +244,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
 - [매니페스트 레퍼런스](https://code.claude.com/docs/en/plugins-reference#monitors)와 [로컬 플러그인 설치](https://code.claude.com/docs/en/discover-plugins)를 참고하세요.
 
 **적용하기**
-- Claude를 평소처럼 재시작하거나, 이미 떠 있는 세션에서 `/reload-plugins`를 쓰세요. **channel 실행 플래그는 필요 없습니다.**
+- Claude를 평소처럼 재시작하세요. 첫 플러그인 설치는 기존 세션의 `/reload-plugins`로 검색할 수 있지만, 이미 실행 중인 MCP 런타임을 교체하려면 재시작해야 합니다. **channel 실행 플래그는 필요 없습니다.**
 - 호스트의 일반적인 작업 공간·플러그인 신뢰 확인 창을 승인하세요. 설치 스크립트가 대신 승인하지 않습니다.
 - 생성된 monitor는 세션 시작과 플러그인 다시 불러오기 때 감시를 시작합니다.
 - Monitor 도구가 있는 대화형 세션에서만 동작합니다. `claude -p`에서는 동작하지 않으며, Bedrock, Google Cloud Agent Platform, Foundry 등 일부 클라우드 제공자에서는 쓸 수 없습니다.
@@ -232,9 +266,9 @@ node /path/to/PeerLetter/src/cli.ts --project /path/to/project \
 ```
 
 **`watch` 동작**
-- 현재 `CLAUDE_CODE_SESSION_ID`나 명시적 UUID가 필요합니다. 설치된 2.1.287의 monitor는 현재 세션 ID를 내보내는 셸 실행기를 씁니다.
+- 자기 호스트의 현재 registry·세션 환경 변수 또는 명시적 UUID가 필요합니다. 설치된 2.1.287의 monitor는 현재 세션 ID를 내보내는 셸 실행기를 씁니다.
 - 최근 세션을 찾거나 역할 이름을 추측하지 않습니다. ID가 없거나 유효하지 않으면 참여자를 만들지 않고 실패합니다.
-- 자기 MCP가 아직 참여하지 않았으면 기다립니다. MCP가 다시 연결돼도 그 세션만 따라갑니다.
+- 자기 MCP가 아직 참여하지 않았으면 기다립니다. MCP 재연결과 같은 프로세스의 세션 전환에서도 검증된 자기 호스트를 따라갑니다.
 - 하지 않는 일:
   - CLI 메일함 등록
   - MCP 온라인 상태 종료
@@ -248,13 +282,21 @@ node /path/to/PeerLetter/src/cli.ts --project /path/to/project \
 - 알림이 성공할 때마다 stdout에 개수와 receive 안내 한 줄을 출력하고, `claude-monitor` 알림으로 기록합니다. 진단 메시지는 stderr로 보냅니다.
 - SQLite가 프로젝트·세션마다 살아 있는 watch 프로세스를 하나로 보장합니다. 경쟁하는 watch는 거부하고, 비정상 종료 뒤에는 소유권을 회수합니다.
 - 출력이 실패하면 재시도할 수 있습니다. 외부 출력과 기록 사이에 프로세스가 죽으면 알림이 반복될 수 있습니다. 정확히 한 번 전달은 보장하지 않습니다.
-- `SIGINT`/`SIGTERM`, 세션 종료 게이트, 다른 방식 선택은 MCP 연결을 끊지 않고 watch 소유권만 놓습니다.
+- `SIGINT`/`SIGTERM`, 호스트 종료, 다른 방식 선택은 MCP 연결을 끊지 않고 watch 소유권만 놓습니다. 실제 Claude ancestor가 확인된 기본 monitor는 SessionEnd → SessionStart 간격을 기다립니다. 명시적으로 세션을 고정한 watch는 세션 종료 때 끝납니다.
 - `--timeout-ms MS`로 제한 시간을 둘 수 있습니다. monitor는 기본적으로 계속 감시합니다.
 
 **재시작 뒤 확인**
 - `whoami.wake_runner.online`과 `wake_error`를 확인하세요. MCP가 시작 시 등록됐다고 해서 monitor가 돌고 있거나 TUI가 반응한다는 증거는 아닙니다.
-- 방식을 바꾸면 `.claude/peerletter.json`이 기록되고, 이전 monitor는 다시 불러오기 전이라도 이 파일을 읽고 곧바로 멈춥니다.
+- 프로젝트 로컬 방식을 바꾸면 `.claude/peerletter.json`이 기록되고(전역 설치는 Claude 사용자 디렉토리 사용), 이전 monitor는 다시 불러오기 전이라도 이 파일을 읽고 곧바로 멈춥니다.
 - Claude 플러그인을 비활성화하는 것만으로는 이미 감시 중인 monitor가 **멈추지 않습니다**. 설치 스크립트로 `none`을 고르거나, 그 작업을 직접 멈추세요. [monitor 생명주기](https://code.claude.com/docs/en/plugins/components#monitors)를 참고하세요.
+
+### Claude `/resume`과 `/clear`
+
+Claude는 MCP를 다시 띄우지 않고 현재 세션을 바꿀 수 있습니다. 상속된 `CLAUDE_CODE_SESSION_ID`는 이때 이전 값으로 남습니다. PeerLetter는 **자기 Claude ancestor**의 현재 registry 또는 그 살아 있는 호스트의 검증된 SessionStart 매핑을 따라갑니다. 다른 프로세스의 최근 세션을 고르지 않습니다. MCP는 새 도구 호출 없이 신원을 갱신하고, 계속 실행되는 monitor는 이전 감시 소유권을 놓고 실제 새 세션에 붙습니다. 호스트 신원을 확인할 수 없다면 다시 연결하세요.
+
+이전 자동 참가자는 오프라인이 되고 자기 lease를 해제합니다. 같은 실제 세션을 resume하면 자동 이름을 되찾고, `/clear`는 다른 메일함을 받습니다. 메일과 수동 pause는 원래 세션에 남습니다. 명시적인 역할 이름은 의도한 비세션 지정 메일을 유지하며, `--session`은 고정되어 따라가지 않습니다. 살아 있는 소유자와 충돌하면 상대 참가자를 가져가거나 이전 actor의 lease를 해제하지 않고 실패합니다. watch 프로세스 자체는 MCP 온라인 상태나 lease를 바꾸지 않습니다.
+
+체크아웃을 업데이트한 뒤 이미 로드된 MCP 코드는 **Claude 재시작**으로 교체해야 합니다. `/reload-plugins`는 플러그인 검색을 갱신하지만 기존 MCP를 다시 띄우거나 기존 monitor를 다시 시작한다고 보장하지 않으므로, 이번 런타임 수정 적용에는 충분하지 않습니다. 이전 MCP가 시작 시 세션 ID를 잡고 있다면 `claude --resume <SESSION_UUID>`로 직접 시작하는 것이 재연결 전까지의 우회 방법입니다. 전환 후 `whoami.session_id`, 정확한 이름, `wake_runner.online`, `wake_error`, `delivery_gate`를 확인하세요.
 
 ### Claude async-rewake (시간 제한이 있는 대안)
 
@@ -501,21 +543,32 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 |---|---|---|
 | `pnpm run test:native-codex` | 설치된 Codex | 격리 설정에서 실제 `codex exec`를 가짜 Responses 제공자로 실행하고, MCP 환경에서 `CODEX_THREAD_ID`를 뺀 상태로 기본 메타데이터가 Codex가 내보내는 것과 같은 thread ID로 연결되는지 |
 | `pnpm run test:native-codex-queue` | 설치된 Codex, Python 3, Unix PTY | 격리된 앱서버와 실제 대화형 TUI를 가짜 Responses 제공자로 띄워, 바쁜 턴에서 받고 ACK한 여러 메일은 추가 턴 0건, 읽지 않은 메일은 턴이 끝난 뒤 1회, 쉬는 상태 메일은 1회 깨우는지 |
+| `pnpm run test:native-pi` | 설치된 Pi 0.99.2 SDK·CLI | 격리된 전역 설치·RPC·가짜 chat 제공자로 프로젝트 신뢰 없이 시작 시 실제 세션 등록과 idle 메일 깨우기 1회 |
+| `pnpm run test:native-global-setup` | 설치된 Claude Code, pnpm 다운로드를 위한 네트워크 | 빈 HOME·의존성 없는 임시 체크아웃에서 실제 `setup all`, 사용자 플러그인 범위와 SQLite 확인 후 전체 삭제 |
 | `pnpm run test:native-claude` | 설치된 Claude Code, Python 3, Unix PTY | 임시 프로젝트에 **async-rewake**를 설치하고, 메일만으로 본문 없는 알림이 담긴 다음 대화형 모델 턴이 시작되는지 |
 
 - **공통:**
   - 가짜 응답 서버(loopback)만 쓰고 외부 모델을 호출하지 않습니다.
   - 실제 데몬, 메일함, 설정, 받은편지함을 바꾸지 않습니다.
 - **`test:native-codex`:** 설치된 클라이언트의 신원만 확인하는 별도 테스트입니다. 쉬고 있는 TUI가 깨어난다는 증거는 아닙니다.
-- **`test:native-codex-queue`:** 생성된 픽스처에 대해서만 일반 UI 신뢰 확인을 승인합니다. Codex 0.160.0으로 테스트했고, 가짜 응답으로 실제 호스트와 장치의 동작을 검증합니다.
+- **`test:native-codex-queue`:** `pnpm run test:native-codex-queue -- --global`은 프로젝트 고정 MCP 없이 전역 설치를 검증하며 CI도 이 모드를 사용합니다. 생성된 픽스처에 대해서만 일반 UI 신뢰 확인을 승인합니다. Codex 0.160.0으로 테스트했고, 가짜 응답으로 실제 호스트와 장치의 동작을 검증합니다.
 - **GitHub Actions:** Codex 0.160.0을 pnpm으로 임시 설치해 두 Codex 테스트를 모두 실행합니다.
 - **`test:native-claude`:**
   - 격리된 Claude 설정과 PeerLetter 상태를 쓰고, 생성된 픽스처에 대해서만 일반 UI 확인을 승인합니다.
   - 가짜 API 키로 로컬 가짜 Anthropic 제공자에 연결하며, channel 플래그를 쓰지 않습니다. 픽스처는 ACK하지 않습니다.
   - 초기 설정 화면 자동화는 버전에 따라 달라질 수 있으며, Claude Code 2.1.287로 테스트했습니다.
   - 이 클라이언트의 로컬 API 키 구성에서는 Monitor를 쓸 수 없어서, monitor 경로는 Monitor를 지원하는 대화형 계정·제공자에서 따로 확인해야 합니다.
+  - `pnpm run test:native-claude -- --session-transitions`는 실제 `/clear`·`/resume <UUID>` UI 명령을 입력하고, resume 때 MCP를 다시 띄우지 않고 실제 세션·이름이 복구되는지와 이후 async-rewake의 idle 깨우기를 확인합니다. Monitor가 없는 제공자에서 Monitor까지 검증하지는 않습니다.
   - 기본 CI SDK 테스트와는 별개인 선택 테스트입니다.
+
+**전역 설치·세션 전환 테스트**
+
+`test:native-pi`는 실제 Pi 0.99.2 CLI를 RPC 모드로 시작합니다. 격리된 사용자 전역 설치, 로컬 가짜 제공자, 신뢰하지 않은 프로젝트 리소스를 사용하며 도구 호출 전 실제 세션 등록과 메일 본문·ACK 없는 idle 깨우기 1회를 확인합니다. 외부 모델을 호출하지 않으며 CI에서도 실행합니다.
+
+임시 HOME에서 세 호스트 설치, 다른 설정과 이후 변경 보존, 다른 설정·수정된 관리 블록 거부, 프로젝트 신뢰 없이 실제 Pi 사용자 확장·skill 로드, 호출한 Codex thread의 Git 루트 선택을 검증합니다. Claude 전환 픽스처는 실제 ancestor 프로세스·MCP·watch를 실행하고 문서화된 registry·훅 변경을 재현합니다. `/clear`·`/resume`, 이전 환경 변수, 도구 재호출 없이 등록, 자동 이름 복구, pause·메일·lease 격리, 명시 세션 고정, 실패 시 rollback을 확인합니다. 모든 호스트·제공자가 Monitor를 제공한다는 증거는 아닙니다.
+
+`test:native-global-setup`은 현재 소스를 의존성 없는 임시 체크아웃에 복사하고 빈 HOME에서 실제 `setup all`과 일반 사용자 플러그인 CLI를 실행합니다. 설정 범위·SQLite·반복 설치를 확인한 뒤 `setup --uninstall all`을 실행합니다. 외부 모델을 호출하거나 실제 사용자 설정을 바꾸지 않습니다.
 
 ## 업데이트
 
-`git pull --ff-only`와 `pnpm install --frozen-lockfile`로 체크아웃을 업데이트한 뒤, 클라이언트를 재시작하거나 다시 불러오세요. 버전 올리기, 레지스트리 업로드, 마켓플레이스 배포는 필요 없습니다.
+`git pull --ff-only`와 `pnpm install --frozen-lockfile --ignore-scripts`로 체크아웃을 업데이트한 뒤, `setup <설치한-agent>`를 다시 실행해 생성된 플러그인·skill 파일을 갱신한 뒤 클라이언트를 다시 연결하거나 재시작하세요. Claude MCP 런타임 코드가 바뀌었다면 Claude를 재시작하세요. 버전 올리기, 레지스트리 업로드, 마켓플레이스 배포는 필요 없습니다.

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { agentKind, ancestors, claudeSession, hostProcess, isProcessAlive } from "./process.ts";
+import { agentKind, ancestors, claudeSession, hostProcess, isProcessAlive, processInfo } from "./process.ts";
 import { resolveProject } from "./project.ts";
 import { Store, hasHostSession } from "./store.ts";
 import type { Agent } from "./store.ts";
@@ -65,9 +65,11 @@ export class Runtime {
     this.hostPids = ancestors().map(p => p.pid);
     const environment = kind === "codex" ? process.env.CODEX_THREAD_ID : registry?.session_id;
     const mapped = this.store.sessionFor(kind,this.hostPids);
-    const hooked = mapped && hasHostSession(kind,mapped,"hook") ? mapped : undefined;
-    const session = native || startup?.session_id || configured || environment || hooked || recovery || `runtime:${randomUUID()}`;
-    this.sessionSource = native ? "mcp-metadata" : startup ? startup.source : configured ? "configured" : environment ? "environment" : hooked ? "hook" : recovery ? "self-binding" : "unbound";
+    const mapping=kind === "claude" && host ? this.store.hostSession(kind,host.pid) : undefined;
+    const registryNewer=registry?.host_pid === host?.pid && (registry?.updated_at || 0) > (mapping?.updated_at || 0);
+    const hooked = mapped && !registryNewer && hasHostSession(kind,mapped,"hook") ? mapped : undefined;
+    const session = native || configured || (kind === "claude" ? hooked : undefined) || registry?.session_id || startup?.session_id || environment || hooked || recovery || `runtime:${randomUUID()}`;
+    this.sessionSource = native ? "mcp-metadata" : configured ? "configured" : kind === "claude" && hooked ? "hook" : registry?.session_id ? "environment" : startup ? startup.source : environment ? "environment" : hooked ? "hook" : recovery ? "self-binding" : "unbound";
     const wake = options.wake || process.env.PEERLETTER_WAKE || "none";
     if (![...claudeWakes, "codex-queue", "pi-extension"].includes(wake)
       || (wake.startsWith("claude-") && kind !== "claude")) {
@@ -85,15 +87,36 @@ export class Runtime {
     if (this.closed) return;
     if (!this.options.session && !process.env.PEERLETTER_SESSION_ID
       && this.sessionSource !== "mcp-metadata" && this.sessionSource !== "self-binding") {
-      const environment = (this.actor.kind === "codex" ? process.env.CODEX_THREAD_ID : undefined)
-        || (this.actor.kind === "claude" ? claudeSession()?.session_id : undefined);
-      const session = environment
-        || this.store.sessionFor(this.actor.kind, this.hostPids);
+      const registry=this.actor.kind === "claude" ? claudeSession() : undefined;
+      const mapping=this.actor.kind === "claude" && this.actor.host_pid ? this.store.hostSession("claude",this.actor.host_pid) : undefined;
+      const registryNewer=registry?.host_pid === this.actor.host_pid && (registry.updated_at || 0) > (mapping?.updated_at || 0);
+      const mapped=registryNewer ? undefined : mapping?.session_id || this.store.sessionFor(this.actor.kind,this.actor.kind === "claude" && this.actor.host_pid ? [this.actor.host_pid] : this.hostPids);
+      const environment = (this.actor.kind === "codex" ? process.env.CODEX_THREAD_ID : undefined) || registry?.session_id;
+      const session = this.actor.kind === "claude" ? mapped || environment : environment || mapped;
       if (session && hasHostSession(this.actor.kind,session,environment ? "environment" : "hook") && session !== this.actor.session_id) {
-        this.adoptSession(session,environment ? "environment" : "hook");
+        if (this.actor.kind === "claude" && agentKind(processInfo(this.actor.host_pid!)?.name) === "claude"
+          && (mapped || registry?.host_pid === this.actor.host_pid)) {
+          this.followClaude(session,mapped ? "hook" : "environment",registry?.cwd);
+        } else this.adoptSession(session,environment ? "environment" : "hook");
       }
     }
     this.store.touch(this.actor);
+  }
+
+  private followClaude(session: string, source: string, cwd?: string): void {
+    validUuid(session,"INVALID_SESSION_ID");
+    const project = resolveProject(this.options.project || process.env.PEERLETTER_PROJECT || cwd || this.store.project.cwd,this.options.state);
+    const nextStore = project.key === this.store.project.key ? this.store : new Store(project);
+    try {
+      const next = nextStore.register({name:this.options.name || process.env.PEERLETTER_NAME,
+        kind:"claude",session_id:session,session_source:source,host_pid:this.actor.host_pid!,wake:this.actor.wake,
+        ...(nextStore === this.store ? {replace:this.actor} : {})});
+      if (nextStore !== this.store) { this.store.closeAgent(this.actor); this.store.close(); this.store=nextStore; }
+      // Channel watchers retain the actor object; keep their identity in sync.
+      Object.assign(this.actor,next);
+      this.sessionSource=source;
+      if (externalClaudeWake(this.actor.wake)) this.store.setWake(this.actor,this.actor.wake,"Waiting for the Claude watch process.");
+    } catch(error) { if (nextStore !== this.store) nextStore.close(); throw error; }
   }
 
   observeRequest(meta?: Record<string,unknown>): void {

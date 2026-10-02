@@ -1,11 +1,20 @@
 ---
 name: peerletter
-description: Coordinate agents working in the same local project through PeerLetter MCP or CLI mail and advisory file leases. Use when the user requests peer communication or shared workspace coordination.
+description: Coordinate agents in one local project through PeerLetter mail and file leases. Use when asked to join PeerLetter, use PeerLetter to communicate with other agents, "PeerLetter 참가해줘", or "PeerLetter 사용해서 다른 에이전트와 통신해줘", or to coordinate a shared workspace.
 ---
 
 # PeerLetter
 
-Use `peerletter_whoami` and `peerletter_peers` to identify your mailbox, session and workspace. Agent names are independent of runtime type; use the exact names returned by the tools. Never infer that every Codex session is called `codex`. An offline registered mailbox can still receive mail.
+## Join when requested
+
+1. Call `peerletter_whoami` from this host's MCP tools. This registers the connection; Codex's first call supplies its native thread ID and enables queue wake.
+2. Call `peerletter_peers` in the same workspace.
+3. Report your exact name, available peer names, `session_binding.state`, wake mode/error, and Claude's `wake_runner.online` when present. Explain any missing binding or watcher.
+4. Call `peerletter_receive` and process mail within the user's task. For a requested conversation, wait with `wait_ms=30000` up to four times for each expected answer. With an empty unsolicited wake, end the turn. Do not repeatedly poll or send pings without a conversation request.
+
+Agent names are independent of runtime type; use the exact names returned by the tools. Never infer that every Codex session is called `codex`. An offline registered mailbox can still receive mail.
+
+For installation, run the checkout's `setup claude|codex|pi|all` to configure user settings, automatic wake and this skill. It uses pnpm and an absolute Node 24.18+ executable. Global entries select the executing session's workspace/Git root; avoid duplicate project entries. Claude needs plugin trust and plugin reload/restart for a first install; runtime updates require restarting Claude because `/reload-plugins` does not reliably respawn an existing MCP or monitor, Codex needs `/hooks` approval and a first whoami after MCP reconnect, and Pi needs `/reload` or restart. User Pi extensions load before project trust; this does not trust project resources. Use `setup --uninstall <agent>` to remove owned settings.
 
 With `wake=none`, clients register only on their first PeerLetter tool call; initialize/tools/list do not join. Opt-in wake connections register at initialization when the actual host session is known: Claude's `CLAUDE_CODE_SESSION_ID` or configured session, the Pi extension's actual `--session`, or a Codex connection deliberately pinned with `--session`. Missing/invalid identities remain lazy. Codex's shared-daemon PID mappings and inherited environment IDs do not identify an unused connection; one stored PID row can conceal several threads. Normal Codex connections still need a first tool call's native threadId. Do not pin unrelated Codex threads to a fixed session. Call whoami to inspect the exact name, `registration.mode`, binding and wake status. Eligible startup conflicts are retried without taking live ownership.
 
@@ -47,4 +56,4 @@ Here `peerletter` denotes the prepared wrapper; otherwise use `node /path/to/Pee
 
 Automatic wake adapters require their host setup. For Pi, `/peerletter pause` persists a manual pause, `/peerletter resume` resumes it, and new explicit user input also resumes it. Check the checkout README when installing or changing a wake adapter.
 
-Claude can use a locally installed monitor plugin without channel launch flags (`--client claude --wake monitor`); `async-rewake` is a Stop-hook alternative with a 600-second host limit and a gap after the waiter expires. Both require the real current Claude session and never register a second actor. Inspect `whoami.wake_runner.online` after plugin reload/restart; startup registration alone does not establish an active watcher. Monitor requires an interactive host with Monitor support. Use the installer to select `none` to stop a running watch before reload; merely disabling a plugin does not stop its existing monitor. Never enable competing manual/project/user MCP entries for one session. Hooks report some UI/compact/interrupt states, but not every Claude cancellation; CLI `pause` persists an explicit pause. Mail never bypasses it. Watch notifications contain no body and never ACK.
+Claude can use a locally installed monitor plugin without channel launch flags (`--client claude --wake monitor`); `async-rewake` is a Stop-hook alternative with a 600-second host limit and a gap after the waiter expires. Both require the real current Claude session and never register a second actor. A monitor and MCP follow verified SessionStart/own-host registry changes during same-process `/resume` or `/clear`; automatic names recover only for that actual session. Old session mail and pause stay with that session and its leases are released. An explicit `--session` stays pinned. Inspect `whoami.wake_runner.online` after plugin reload/restart; startup registration alone does not establish an active watcher. Monitor requires an interactive host with Monitor support. Use the installer to select `none` to stop a running watch before reload; merely disabling a plugin does not stop its existing monitor. Never enable competing manual/project/user MCP entries for one session. Hooks report some UI/compact/interrupt states, but not every Claude cancellation; CLI `pause` persists an explicit pause. Mail never bypasses it. Watch notifications contain no body and never ACK.
