@@ -17,7 +17,7 @@ git clone https://github.com/crazylulu-c2sh/PeerLetter.git ~/dev/PeerLetter
 # 하나만 고르려면: setup claude | setup codex | setup pi
 ```
 
-`setup`은 PATH와 일반적인 nvm 설치에서 Node **24.18 이상**을 찾아 실제 절대 경로를 고정합니다. **pnpm 11.18.0 또는 Corepack**으로 `--frozen-lockfile --ignore-scripts` 설치를 수행합니다. 빌드나 의존성 빌드 승인은 필요 없습니다. Node·pnpm이 없으면 설치 방법을 출력하고 종료합니다. `PEERLETTER_NODE=/absolute/path/to/node`로 Node를 직접 고를 수도 있습니다. Bash가 필요합니다. 설치된 체크아웃 경로를 유지하고, 경로나 Node 설치가 바뀌면 setup을 다시 실행하세요.
+`setup`은 PATH와 일반적인 nvm 설치에서 Node **24.18 이상**을 찾아 실제 절대 경로를 고정합니다. **pnpm 10 이상 또는 Corepack**으로(pnpm이 `packageManager` 버전으로 알아서 전환합니다) `--frozen-lockfile --ignore-scripts` 설치를 수행합니다. 빌드나 의존성 빌드 승인은 필요 없습니다. Node·pnpm이 없으면 설치 방법을 출력하고 종료합니다. `PEERLETTER_NODE=/absolute/path/to/node`로 Node를 직접 고를 수도 있습니다. Bash가 필요합니다. 설치된 체크아웃 경로를 유지하고, 경로나 Node 설치가 바뀌면 setup을 다시 실행하세요.
 
 사용자의 **모든 프로젝트에서** 쓸 깨우기와 PeerLetter skill을 설치합니다. 설치 확인, 작업 공간 SQLite `doctor` 결과, 비공개 백업 경로, 현재 디렉토리의 기존 프로젝트 설정 충돌, 호스트에서 마칠 단계를 출력합니다. 관계없는 설정은 보존합니다. Claude에는 비공개 디렉토리 카탈로그를 쓰며, 업로드나 배포는 하지 않습니다.
 
