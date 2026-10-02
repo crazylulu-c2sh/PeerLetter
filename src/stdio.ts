@@ -12,7 +12,9 @@ work outside the user's task. Receive does not ACK: ACK only after processing; A
 requested work is complete. Use full UUIDs for reply_to and stable idempotency keys for retries.
 Do not automatically reply to every message. High importance changes ordering and never bypasses pause.
 Use leases before editing shared files and coordinate git writes with the other agents.
-Codex: call peerletter_whoami once at task start so native threadId metadata binds your real session.
+Every client: call peerletter_whoami once to join; initialize/tools/list do not register a participant.
+Automatic names are reused only for the same bound host session. Use your exact returned name.
+Codex: native threadId metadata binds your real session before first registration.
 If session_binding.state is unbound, read your own CODEX_THREAD_ID from the host shell and use
 peerletter_bind_session, or review /hooks and start a new session. Never guess a thread ID.`;
 const { runtime: options, values } = parseOptions();
@@ -27,34 +29,33 @@ const server = new McpServer({ name: "peerletter", version: "0.1.0" }, {
 let runtime: Runtime | undefined;
 let watcher: MailWatcher | undefined;
 let closing = false;
-let initializationError: unknown;
+let initialized = false;
 const stopped = new AbortController();
 
 server.server.oninitialized = () => {
-  try {
-    runtime = new Runtime(server.server.getClientVersion()?.name || "", options);
-    const current = runtime;
-    if (wake === "claude-channel" || wake === "codex-queue") {
-      watcher = new MailWatcher(current.store, current.actor, wake, async messages => {
-        const content = noticeText(messages);
-        if (wake === "claude-channel") {
-          if (current.actor.kind !== "claude") throw new MailError("WAKE_UNAVAILABLE", "Claude channels require a Claude client.");
-          await server.server.notification({ method: "notifications/claude/channel", params: { content } });
-        } else await queueCodex(current.codexTarget(), content);
-      }, { backlog: options.wakeBacklog, before: () => current.refresh() });
-      watcher.start();
-    }
-  } catch (error) {
-    initializationError = error;
-    console.error(JSON.stringify(errorResult(error)));
-    // Keep the protocol alive so tools return the original actionable failure, including
-    // NAME_IN_USE. The host owns this subprocess and closes it on disconnect or restart.
-  }
+  initialized = true;
 };
 
-function current(): Runtime {
-  if (initializationError) throw initializationError;
-  if (!runtime || closing) throw new MailError("NOT_READY", "The MCP session is not initialized.");
+function current(meta?: Record<string,unknown>, recoverySession?: string): Runtime {
+  if (!initialized || closing) throw new MailError("NOT_READY", "The MCP session is not initialized.");
+  if (!runtime) {
+    // Listing tools can happen for unused threads or subagents. Allocate a mailbox only
+    // when an actual tool call arrives, after validating this call's host identity.
+    const candidate = new Runtime(server.server.getClientVersion()?.name || "",options,meta,recoverySession);
+    runtime = candidate;
+    const active = candidate;
+    if (wake === "claude-channel" || wake === "codex-queue") {
+      watcher = new MailWatcher(active.store, active.actor, wake, async messages => {
+        const content = noticeText(messages);
+        if (wake === "claude-channel") {
+          if (active.actor.kind !== "claude") throw new MailError("WAKE_UNAVAILABLE", "Claude channels require a Claude client.");
+          await server.server.notification({ method: "notifications/claude/channel", params: { content } });
+        } else await queueCodex(active.codexTarget(), content);
+      }, { backlog: options.wakeBacklog, before: () => active.refresh() });
+      watcher.start();
+    }
+  }
+  runtime.observeRequest(meta);
   runtime.refresh(); return runtime;
 }
 function tool(name: string, description: string, schema: z.ZodRawShape, fn: (args: any, r: Runtime, signal: AbortSignal) => unknown,
@@ -63,8 +64,7 @@ function tool(name: string, description: string, schema: z.ZodRawShape, fn: (arg
     annotations: { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: true, openWorldHint: false } },
   async (args, extra) => {
     try {
-      const r = current();
-      r.observeRequest(extra._meta);
+      const r = current(extra._meta,name === "peerletter_bind_session" ? args.session_id : undefined);
       const result = await fn(args, r, AbortSignal.any([extra.signal, stopped.signal]));
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error) { return { isError: true, content: [{ type: "text", text: JSON.stringify(errorResult(error)) }] }; }

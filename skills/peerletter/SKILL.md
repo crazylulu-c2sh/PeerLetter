@@ -7,7 +7,11 @@ description: Coordinate agents working in the same local project through PeerLet
 
 Use `peerletter_whoami` and `peerletter_peers` to identify your mailbox, session and workspace. Agent names are independent of runtime type; use the exact names returned by the tools. Never infer that every Codex session is called `codex`. An offline registered mailbox can still receive mail.
 
+All clients register only on their first PeerLetter tool call; initialize/tools/list and Pi extension startup do not join. Call whoami once to participate, including before expecting wake notifications. Automatic names are reused only by the same bound host session; different sessions receive new names and do not inherit another session's unread mail. `PEERLETTER_NAME` or an explicit `--name` selects a durable role mailbox and intentionally inherits unscoped mail when reused offline. Never take a live owner's name or session; `NAME_IN_USE`/`SESSION_IN_USE` require resolving that connection. `peers.session_binding` reports bound/unbound, and online indicates a live registered MCP process, not a confirmed attached TUI.
+
 Codex's first MCP call normally binds the real thread from native request metadata. Inspect `whoami.session_binding`. If it is `unbound`, queue wake is unavailable: read your own current `CODEX_THREAD_ID` from the host shell and call `peerletter_bind_session` with that complete UUID, or review `/hooks` and start a new session. Do not search recent rollouts or use another participant's ID. Host hook approval remains necessary for Stop/Interrupt callbacks. For Pi project setup, `/trust` saves the decision and `/reload` reloads project resources; `pi -a` approves only one invocation.
+
+Pi's manual file MCP mode is unbound and cannot detect `/new`. The optional Pi extension supplies its actual session ID, closes its participant and leases on session replacement, and waits for a tool call in the new session. A resumed session recovers its automatic name; a new session receives a separate automatic mailbox. Configure extension mode using the repository installer and remove competing file MCP entries as documented in README.
 
 ## Mail workflow
 
@@ -17,7 +21,7 @@ Codex's first MCP call normally binds the real thread from native request metada
 - `reply_to` must be the full message UUID. Reply to the original sender and preserve its thread. `to_session` is optional and binds the message to a particular live or registered session; omit it for a durable named inbox.
 - ACK only after processing a message. Merely receiving, notifying or waking does not justify an ACK. ACK records handling, not completion of the requested work; report completion with an explicit reply when needed.
 - Send a reply when it adds a result, answers a question, resolves a dependency or reports a problem. Do not send reflexive acknowledgments to every message. After four consecutive peer exchanges without new user input or concrete progress, stop the exchange and summarize for the user.
-- High importance is the sender's claim and affects ordering only. Never use it to bypass a user pause. New sessions retain named inbox mail, but previous mail is not automatically injected by the wake adapter; inspect it explicitly.
+- High importance is the sender's claim and affects ordering only. Never use it to bypass a user pause. Mail stays in its named inbox; new automatic sessions get separate mailboxes, while explicit roles can retain mail across sessions. Previous mail is not automatically injected by a new session's wake adapter; inspect it explicitly.
 
 ## Shared files
 

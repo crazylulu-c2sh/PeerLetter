@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { agentKind, ancestors, claudeSession, hostProcess, isProcessAlive } from "./process.ts";
 import { resolveProject } from "./project.ts";
-import { Store } from "./store.ts";
+import { Store, hasHostSession } from "./store.ts";
 import type { Agent } from "./store.ts";
 import { MailError, validUuid } from "./errors.ts";
 
@@ -18,28 +18,31 @@ export class Runtime {
   private closed = false;
   private sessionSource: string;
 
-  constructor(clientName: string, options: RuntimeOptions = {}) {
+  constructor(clientName: string, options: RuntimeOptions = {}, meta?: Record<string,unknown>, recoverySession?: string) {
     this.options = options;
     const kind = options.kind || process.env.PEERLETTER_KIND || agentKind(clientName);
+    const configured = options.session || process.env.PEERLETTER_SESSION_ID;
+    const native = kind === "codex" && meta?.threadId !== undefined ? validUuid(String(meta.threadId),"INVALID_THREAD_ID") : undefined;
+    const recovery = kind === "codex" && recoverySession ? validUuid(recoverySession,"INVALID_THREAD_ID") : undefined;
+    if (native && configured && native !== configured) throw new MailError("SESSION_MISMATCH","Configured session differs from the calling Codex thread.");
     const host = hostProcess(kind);
     const registry = kind === "claude" ? claudeSession() : undefined;
     const project = options.project || process.env.PEERLETTER_PROJECT || registry?.cwd || host?.cwd || process.cwd();
     this.store = new Store(resolveProject(project, options.state));
     this.hostPids = ancestors().map(p => p.pid);
-    const configured = options.session || process.env.PEERLETTER_SESSION_ID;
     const environment = kind === "codex" ? process.env.CODEX_THREAD_ID : registry?.session_id;
-    const hooked = this.store.sessionFor(kind,this.hostPids);
-    const session = configured || environment || hooked || `runtime:${randomUUID()}`;
-    this.sessionSource = configured ? "configured" : environment ? "environment" : hooked ? "hook" : "unbound";
+    const mapped = this.store.sessionFor(kind,this.hostPids);
+    const hooked = mapped && hasHostSession(kind,mapped,"hook") ? mapped : undefined;
+    const session = native || configured || environment || hooked || recovery || `runtime:${randomUUID()}`;
+    this.sessionSource = native ? "mcp-metadata" : configured ? "configured" : environment ? "environment" : hooked ? "hook" : recovery ? "self-binding" : "unbound";
     const wake = options.wake || process.env.PEERLETTER_WAKE || "none";
     if (!["none", "claude-channel", "codex-queue", "pi-extension"].includes(wake)) {
       this.store.close(); throw new MailError("INVALID_WAKE", "Use none, claude-channel, codex-queue or pi-extension.");
     }
     try {
       this.actor = this.store.register({ name: options.name || process.env.PEERLETTER_NAME,
-        kind, session_id: session, host_pid: host?.pid, wake });
-      // A fallback runtime UUID must not overwrite a hook's host-to-session mapping.
-      if (host && this.sessionSource !== "unbound") this.store.bindSession(kind, host.pid, session);
+        kind, session_id: session, host_pid: host?.pid, wake, session_source:this.sessionSource });
+      // Only host hooks/adapters write PID mappings: a Codex daemon can parent several threads.
     } catch (error) { this.store.close(); throw error; }
   }
 
@@ -47,12 +50,12 @@ export class Runtime {
     if (this.closed) return;
     if (!this.options.session && !process.env.PEERLETTER_SESSION_ID
       && this.sessionSource !== "mcp-metadata" && this.sessionSource !== "self-binding") {
-      const session = (this.actor.kind === "codex" ? process.env.CODEX_THREAD_ID : undefined)
-        || (this.actor.kind === "claude" ? claudeSession()?.session_id : undefined)
+      const environment = (this.actor.kind === "codex" ? process.env.CODEX_THREAD_ID : undefined)
+        || (this.actor.kind === "claude" ? claudeSession()?.session_id : undefined);
+      const session = environment
         || this.store.sessionFor(this.actor.kind, this.hostPids);
-      if (session && !session.startsWith("runtime:") && session !== this.actor.session_id) {
-        this.store.updateSession(this.actor, session,this.sessionSource === "unbound");
-        this.sessionSource = "hook";
+      if (session && hasHostSession(this.actor.kind,session,environment ? "environment" : "hook") && session !== this.actor.session_id) {
+        this.adoptSession(session,environment ? "environment" : "hook");
       }
     }
     this.store.touch(this.actor);
@@ -75,15 +78,21 @@ export class Runtime {
   bindOwnSession(session: string) {
     if (this.actor.kind !== "codex") throw new MailError("UNSUPPORTED_CLIENT","Explicit thread binding is for Codex; other clients use their own session adapter.");
     validUuid(session,"INVALID_THREAD_ID");
-    if (this.sessionSource !== "unbound" && this.actor.session_id !== session) {
+    if ((this.sessionSource === "configured" || hasHostSession(this.actor.kind,this.actor.session_id,this.sessionSource)) && this.actor.session_id !== session) {
       throw new MailError("SESSION_MISMATCH","This participant already has another host session. Use the thread ID from your own current session.");
     }
-    if (this.sessionSource === "unbound") this.adoptSession(session,"self-binding");
+    if (!hasHostSession(this.actor.kind,this.actor.session_id,this.sessionSource)) this.adoptSession(session,"self-binding");
     return this.whoami();
   }
 
   private adoptSession(session: string, source: string): void {
-    if (session !== this.actor.session_id) this.store.updateSession(this.actor,session,this.sessionSource === "unbound");
+    if (session !== this.actor.session_id) {
+      if (hasHostSession(this.actor.kind,this.actor.session_id,this.sessionSource)) {
+        throw new MailError("SESSION_MISMATCH","Host session changed on an existing participant. Reconnect MCP so the new session gets its own mailbox.");
+      }
+      this.store.updateSession(this.actor,session,true,source);
+    }
+    else if (source !== this.sessionSource) this.store.setSessionSource(this.actor,source);
     this.sessionSource = source;
   }
 
@@ -98,15 +107,14 @@ export class Runtime {
 
   whoami() {
     this.refresh();
-    let bound = this.sessionSource !== "unbound" && !this.actor.session_id.startsWith("runtime:");
-    if (bound && this.actor.kind === "codex") {
-      try { validUuid(this.actor.session_id); } catch { bound = false; }
-    }
+    const bound = hasHostSession(this.actor.kind,this.actor.session_id,this.sessionSource);
     return { ...this.store.publicAgent(this.store.agent(this.actor.name)!), project_key: this.store.project.key,
       project: this.store.project.cwd, database: this.store.project.database,
       session_binding: { state: bound ? "bound" : "unbound", source: this.sessionSource,
         ...(this.actor.kind === "codex" && !bound ? { reason: "No Codex thread ID received; queue wake and session-specific hooks are unavailable until binding.",
-          next: "Call peerletter_whoami from Codex (native request metadata), or review /hooks and restart; if needed read your own CODEX_THREAD_ID and use peerletter_bind_session." } : {}) },
+          next: "Call peerletter_whoami from Codex (native request metadata), or review /hooks and restart; if needed read your own CODEX_THREAD_ID and use peerletter_bind_session." }
+          : this.actor.kind === "pi" && !bound ? { reason:"Manual MCP has no Pi session identity and cannot observe /new.",
+            next:"Use the session-bound Pi extension for actual session IDs and /new transitions; call whoami after reloading." } : {}) },
       protocol: "stdio", delivery: "at-least-once", ack_means: "processed; completion requires a reply" };
   }
 

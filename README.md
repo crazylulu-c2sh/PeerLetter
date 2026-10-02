@@ -67,15 +67,31 @@ Host trust rules still apply: approve the Claude project MCP server, use Pi `/tr
 
 By default all three use manual inbox checks. After connecting, call `peerletter_whoami` and `peerletter_peers` to verify the project and name before sending. Claude's PostToolUse hook can signal new mail during ongoing work; Stop signals at the end of a turn. Each signal is body-free, is deduplicated across adapters, and never ACKs.
 
+### Participation and mailbox names
+
+All clients join on their **first PeerLetter tool call**. MCP initialization and `tools/list` do not register a participant, reserve a name or start a wake watcher. This includes unused loaded threads, headless clients and subagents. Call `peerletter_whoami` to join before exchanging mail or expecting automatic wake. Hooks tolerate sessions that have not joined. The Pi extension also waits for a tool call; it never calls whoami during startup.
+
+Automatic names (`codex`, `codex-2`, `claude`, `pi`, etc.) are reserved for their original host session. A reconnect with the same bound session ID reuses its offline automatic name. A different session gets a new unused name, including when the old process is offline and its inbox has unread mail. Unbound `runtime:...` identities cannot reuse an old automatic name. Always use the exact name returned by whoami.
+
+For a durable **role mailbox**, set `PEERLETTER_NAME`; file MCP configuration also accepts `--name` when installing one client. Pi extension mode takes its role name from `PEERLETTER_NAME` when launching Pi and rejects an installer `--name` that would not reach the extension. Explicitly reusing an offline role name intentionally inherits its unscoped, unacknowledged mail. An automatic allocation does not take an explicitly named role mailbox. A live name owner yields `NAME_IN_USE`; a second live connection for the same bound host session yields `SESSION_IN_USE`. Ownership is never transferred from a live runtime. After its owner disconnects, retrying the tool can register successfully.
+
+`whoami` and `peers` report `naming` (`automatic`, `explicit`, or `legacy`) and `session_binding` (`bound` or `unbound`, with its source). `online` means the registered MCP process is alive; it does not prove that a TUI is attached or will read mail. Existing legacy mailboxes remain stored and are not reassigned automatically to unrelated sessions. Reconnect old MCP processes after updating to apply this registration policy.
+
+Once a participant has a bound host identity, a different identity on the same connection returns `SESSION_MISMATCH`. Reconnect to register the new session; this keeps automatic mailboxes separate. Binding an initially unbound runtime to its own session remains supported.
+
 ### Codex session binding
 
-On the tested Codex 0.159.3, each MCP tool call carries the current thread in `_meta.threadId`. PeerLetter binds it automatically on the first call, including `peerletter_whoami`; this works when the MCP subprocess has no `CODEX_THREAD_ID` and SessionStart hooks are unreviewed. A fork's `_meta.sessionId` can identify the root session, so it is not used as a queue target. This is a version-specific integration verified against the installed client and the [Codex tool-call source](https://github.com/openai/codex/blob/main/codex-rs/core/src/mcp_tool_call.rs).
+On the tested Codex 0.159.3, each MCP tool call carries the current thread in `_meta.threadId`. PeerLetter validates it before first registration, including `peerletter_whoami`; this works when the MCP subprocess has no `CODEX_THREAD_ID` and SessionStart hooks are unreviewed. A fork's `_meta.sessionId` can identify the root session, so it is not used as a queue target. This is a version-specific integration verified against the installed client and the [Codex tool-call source](https://github.com/openai/codex/blob/main/codex-rs/core/src/mcp_tool_call.rs).
 
 Inspect `whoami.session_binding`: `bound` identifies a host session, while `unbound` means only a temporary `runtime:...` mailbox identity is available. Basic send/receive still work, but queue wake needs a real thread ID. Fallback IDs are never written as host session mappings. If a hook runs later, the runtime can adopt its mapping. Binding a temporary identity preserves its pause, advisory leases and wake baseline.
 
 For older clients that omit native thread metadata, read **your own** `CODEX_THREAD_ID` from the agent's shell, then call `peerletter_bind_session({session_id: "<that full UUID>"})`. Alternatively review `/hooks` and start a new session so SessionStart can bind it. Never choose a recent rollout, a peer's ID or a guessed ID. Stop and Interrupt hooks still require host review even when native metadata already bound the thread.
 
-If a configured name is already online, tools return `NAME_IN_USE` with an actionable message. Restart that MCP connection with another name; a failed registration no longer hides the cause behind `NOT_READY`.
+To recover an automatic name on an older client without another identity source, make `peerletter_bind_session` your first PeerLetter call. An initial unbound whoami allocates a fresh mailbox; binding it later preserves that mailbox's address, pause, leases and wake baseline.
+
+If you want to continue an existing Codex conversation, you can launch directly with `codex resume <thread-id>` or `codex resume --last`. This is an optional starting method; participant registration still waits for a PeerLetter tool call.
+
+If a configured name is already online, tools return `NAME_IN_USE` with an actionable message. Retry after the owner disconnects, or restart with another name for a different session. A failed registration does not hide the cause behind `NOT_READY` or permanently prevent retry.
 
 For one client only, add `--client codex|claude|pi`. An explicit name uses `--client codex --name codex-review`; otherwise live sessions get `codex`, `codex-2`, etc. Set `PEERLETTER_NAME` when launching a host to name each participant independently; Codex configuration forwards it to the MCP subprocess.
 
@@ -131,17 +147,19 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
 
 Reload Pi or start a new session. The extension dynamically registers the same stdio MCP core and binds the actual Pi session ID. The installer removes its own file MCP entry so it cannot override this registration. Do not retain a global `mcp.json` entry named `peerletter` when using the extension; Pi gives file configuration precedence. You can instead launch with `pi -e ~/dev/PeerLetter/pi/peerletter.ts --skill ~/dev/PeerLetter/skills/peerletter`.
 
+The default file MCP mode has no Pi session ID and cannot observe `/new`; whoami reports it as `unbound`. Use extension mode for real session identity and transitions. On `/new`, resume, fork, reload or quit, the extension closes only its own participant, releases its leases and stops polling. The next session joins on its first tool call. Resuming the same actual session reuses its offline automatic name; `/new` receives a different automatic name. A role name set explicitly continues its durable inbox. Loading the same session in another Pi process does not grant ownership of the first process's participant.
+
 The extension watches the inbox and sends a body-free `pi.sendMessage(..., {triggerTurn:true, deliverAs:'steer'})`. Manual pause, abort, provider errors, UI dialogs and compaction gate injection. `/peerletter pause`, `/peerletter resume` and `/peerletter status` control or inspect it. New explicit user input resumes a pause. The adapter targets the installed Pi 0.99.2 extension API; see [Pi extensions documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md).
 
 ### Restart and previous mail
 
-Messages without `to_session` stay in the named inbox across sessions. Session-specific messages remain tied to that session. On a new session, wake adapters skip previously stored mail; explicitly call receive to inspect it. To intentionally wake for the existing backlog, pass `--wake-backlog` to stdio, or set `PEERLETTER_WAKE_BACKLOG=1` for the Pi extension. The Stop hook skips mail predating its session registration.
+Messages stay in their named inbox. The same bound session can recover its automatic mailbox on reconnect; another session gets a separate automatic mailbox. Explicit role names intentionally retain mail across sessions when `to_session` is omitted. Session-specific messages remain tied to that session. On a new session, wake adapters skip previously stored mail; explicitly call receive to inspect it. To intentionally wake for the existing backlog, pass `--wake-backlog` to stdio, or set `PEERLETTER_WAKE_BACKLOG=1` for the Pi extension. The Stop hook skips mail predating its session registration.
 
 ## Tools and delivery
 
 | Tool | Purpose |
 |---|---|
-| `peerletter_whoami`, `peerletter_peers` | Name, session, workspace, presence and wake status; whoami also reports session binding |
+| `peerletter_whoami`, `peerletter_peers` | Name, session, workspace, presence, wake status, naming policy and session binding |
 | `peerletter_bind_session` | Recovery for Codex clients without native metadata; binds only this participant to its own current full thread UUID |
 | `peerletter_send` | `to`, `text`, required `idempotency_key`; optional full UUID `reply_to`, `thread_id`, `to_session`, `importance` |
 | `peerletter_receive`, `peerletter_peek` | At most 20 unacknowledged messages; priority then acceptance order; optional cursor |
@@ -151,7 +169,7 @@ Messages without `to_session` stay in the named inbox across sessions. Session-s
 
 `receive(wait_ms)` accepts 0–30000 and marks returned mail delivered, without ACK. `peek` has no delivery side effect. Reading and notifications can repeat after a crash; there is no exactly-once guarantee for external work. Keep message IDs in any downstream deduplication mechanism that needs it. ACK means processed, and completion requires an explicit result or reply.
 
-Names are unique among online participants. Explicit collisions fail with `NAME_IN_USE`; unspecified names receive suffixes. Presence uses the MCP PID and process start time, not a heartbeat timeout. EOF/SIGTERM mark the process offline and release its leases. SIGKILL is detected on the next presence scan; crashed leases expire by TTL. A live but idle process is still online.
+Names are unique among online participants. Explicit collisions fail with `NAME_IN_USE`; automatic names use unclaimed suffixes or recover the same offline bound session. A duplicate live host session fails with `SESSION_IN_USE`. Presence uses the MCP PID and process start time, not a heartbeat timeout. EOF/SIGTERM mark the process offline and release its leases. SIGKILL is detected on the next presence scan; crashed leases expire by TTL. A registered live but idle process is still online.
 
 ## SQLite and maintenance
 
@@ -159,6 +177,7 @@ Names are unique among online participants. Explicit collisions fail with `NAME_
 - Default database: `~/.local/state/peerletter/<key>/peerletter.db`. `PEERLETTER_STATE_DIR` overrides the state root and `PEERLETTER_PROJECT` overrides the workspace.
 - Directories are 0700 and database/WAL/SHM files are 0600. The local OS account is the trust boundary. CLI is allowed to act as any local named mailbox; it is not cross-user authentication.
 - SQLite uses WAL, 5000 ms busy timeout, foreign keys and `synchronous=FULL`. Long polls hold no write transaction. Use local storage; WAL is unsuitable for a network filesystem.
+- Schema 2 adds naming and session-source metadata in a separate table. Existing schema 1 mailboxes, messages, delivery states and leases are preserved in an atomic migration. Legacy names can be recovered by the same bound session and stay reserved for other automatic sessions. Older checkouts cannot open a migrated database; update all clients to this checkout and reconnect.
 - Retention is manual: `prune --days 30` previews removal of whole threads whose messages are all ACKed and whose ACKs are older than 30 days. `--apply` removes them. There is no automatic deletion.
 - `doctor` checks permissions and SQLite integrity. `doctor --checkpoint` requests a TRUNCATE checkpoint; run during low activity and inspect its busy result.
 
@@ -170,7 +189,7 @@ Read the shared [collaboration skill](skills/peerletter/SKILL.md) for inbox timi
 
 `pnpm run check` checks core, hook, script and Pi extension types. `pnpm test` covers shared SQLite semantics and launches real SDK stdio clients as Codex, Claude and Pi. Tests use temporary state, not live agent mailboxes. The GitHub Actions workflow runs from a clean checkout on Node 24, installs the frozen pnpm lockfile, checks types and runs tests. It has no publishing step.
 
-The suite checks concurrent writes, deduplication, reply direction, priority cursors, atomic ACK ownership, cancellation, leases, durable restart, SIGKILL presence, permissions, notification gates and Claude channel framing. It also covers Codex metadata binding, explicit recovery, name-collision errors and Claude mid-turn hooks. Tests never send mail to running agents.
+The suite checks concurrent writes, deduplication, reply direction, priority cursors, atomic ACK ownership, cancellation, leases, durable restart, SIGKILL presence, permissions, notification gates and Claude channel framing. It also covers lazy registration for all clients, first-call Codex identity, same-session name recovery, mail isolation between different sessions, schema 1 migration, live-owner protection, Pi `/new`/resume using real stdio MCP clients, explicit recovery, name-collision errors and Claude mid-turn hooks. Tests never send mail to running agents.
 
 `pnpm run test:native-codex` runs a regression for an installed Codex executable. It runs real `codex exec` against a loopback mock Responses provider in an isolated configuration, strips `CODEX_THREAD_ID` from the MCP environment, and verifies native metadata binds the same thread ID that Codex emits. GitHub Actions runs it with Codex 0.159.3 temporarily installed using pnpm. No external model or production mailbox is used. This installed-client test is separate from the default SDK suite and does not prove that an idle TUI wakes. Try opt-in wake adapters in their actual interactive clients after completing host setup.
 

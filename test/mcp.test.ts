@@ -12,9 +12,9 @@ import { Store } from "../src/store.ts";
 import { resolveProject } from "../src/project.ts";
 
 const script = fileURLToPath(new URL("../src/stdio.ts",import.meta.url));
-async function client(name: string, kind: string, project: string, state: string, extra: string[] = [], expectedReadyError?: string) {
+async function client(name: string | undefined, kind: string, project: string, state: string, extra: string[] = [], expectedReadyError?: string, lazy = false) {
   const transport = new StdioClientTransport({ command: process.execPath,
-    args: [script,"--project",project,"--name",name,"--state",state,...extra], stderr: "pipe" });
+    args: [script,"--project",project,...(name ? ["--name",name] : []),"--state",state,...extra], stderr: "pipe" });
   const sdk = new Client({ name: kind, version: "test" });
   let errors = ""; transport.stderr?.on("data",chunk=>{errors+=String(chunk);});
   await sdk.connect(transport);
@@ -24,11 +24,88 @@ async function client(name: string, kind: string, project: string, state: string
     const value = JSON.parse(blocks.find(b=>b.type==="text")!.text!);
     return { value, error: !!response.isError };
   }
-  const ready = await call("whoami");
-  if(expectedReadyError) assert.equal(ready.value.error?.code,expectedReadyError);
-  else assert.equal(ready.error,false,JSON.stringify(ready.value));
+  if(!lazy) {
+    const ready = await call("whoami");
+    if(expectedReadyError) assert.equal(ready.value.error?.code,expectedReadyError);
+    else assert.equal(ready.error,false,JSON.stringify(ready.value));
+  }
   return { sdk,transport,call,errors:()=>errors };
 }
+
+test("initialize and tools/list never register unused clients or reserve fixed names",{timeout:20000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-lazy-"));const project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state));const clients: Awaited<ReturnType<typeof client>>[]=[];
+  t.after(async()=>{await Promise.all(clients.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
+  for(const kind of ["codex","claude","pi"]) {
+    const name=`fixed-${kind}`;
+    const unused=await client(name,kind,project,state,[],undefined,true);clients.push(unused);
+    assert.equal((await unused.sdk.listTools()).tools.length,11);
+    assert.equal(store.agent(name),undefined);
+    const active=await client(name,kind,project,state,[],undefined,true);clients.push(active);
+    const thread=randomUUID(),meta=kind === "codex" ? {threadId:thread,sessionId:randomUUID()} : undefined;
+    const identity=await active.call("whoami",{},meta);
+    assert.equal(identity.error,false);assert.equal(identity.value.name,name);
+    if(meta) {assert.equal(identity.value.session_id,thread);assert.equal(identity.value.session_binding.source,"mcp-metadata");}
+    const owner=store.agent(name)!.runtime_id;
+    assert.equal((await unused.call("whoami")).value.error.code,"NAME_IN_USE");
+    assert.equal(store.agent(name)?.runtime_id,owner);
+    await active.sdk.close();
+    const joined=await unused.call("whoami");assert.equal(joined.error,false,"Registration failure is retryable after the owner disconnects");
+    await unused.sdk.close();
+  }
+});
+
+test("native first-call identity reuses a resumed Codex name and isolates other threads",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-resume-"));const project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state));const clients: Awaited<ReturnType<typeof client>>[]=[];
+  t.after(async()=>{await Promise.all(clients.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
+  const open=async()=>{const c=await client(undefined,"codex",project,state,[],undefined,true);clients.push(c);return c;};
+  const thread=randomUUID(),first=await open();
+  const name=(await first.call("whoami",{},{threadId:thread})).value.name;
+  const sender=store.register({name:"sender",kind:"claude",session_id:randomUUID()});
+  const mail=store.send(sender,{to:name,text:"for original thread",idempotency_key:"original"}).message;
+  await first.sdk.close();
+  const other=await open();const different=(await other.call("whoami",{},{threadId:randomUUID()})).value;
+  assert.notEqual(different.name,name);assert.equal((await other.call("receive")).value.messages.length,0);
+  const resumed=await open();const identity=(await resumed.call("whoami",{},{threadId:thread})).value;
+  assert.equal(identity.name,name);assert.equal((await resumed.call("receive")).value.messages[0].id,mail.id);
+  const duplicate=await open();assert.equal((await duplicate.call("whoami",{},{threadId:thread})).value.error.code,"SESSION_IN_USE");
+  assert.equal(store.peers().filter(p=>p.kind === "codex").length,2);
+});
+
+test("invalid Codex metadata cannot claim a name and direct recovery binds before registration",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-first-id-"));const project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state));const clients: Awaited<ReturnType<typeof client>>[]=[];
+  t.after(async()=>{await Promise.all(clients.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
+  const first=await client(undefined,"codex",project,state,[],undefined,true);clients.push(first);
+  assert.equal((await first.call("whoami",{},{threadId:"not-a-uuid"})).value.error.code,"INVALID_THREAD_ID");
+  assert.equal(store.peers().length,0);
+  const thread=randomUUID();const recovered=await first.call("bind_session",{session_id:thread});
+  assert.equal(recovered.error,false);assert.equal(recovered.value.session_id,thread);assert.equal(recovered.value.session_binding.source,"self-binding");
+  const name=recovered.value.name;await first.sdk.close();
+  const resumed=await client(undefined,"codex",project,state,[],undefined,true);clients.push(resumed);
+  assert.equal((await resumed.call("bind_session",{session_id:thread})).value.name,name);
+  assert.equal((await resumed.call("whoami",{},{threadId:randomUUID()})).value.error.code,"SESSION_MISMATCH");
+  assert.equal(store.agent(name)?.session_id,thread,"Native metadata must not switch an already bound session's mailbox");
+});
+
+test("a changed host hook identity requires reconnecting and preserves automatic mailbox isolation",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-host-change-"));const project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state)),session=randomUUID();
+  store.bindSession("claude",process.pid,session);
+  const first=await client(undefined,"claude",project,state,[],undefined,true);
+  let next: Awaited<ReturnType<typeof client>> | undefined;
+  t.after(async()=>{await first.sdk.close();await next?.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
+  const identity=(await first.call("whoami")).value;assert.equal(identity.session_id,session);
+  const sender=store.register({name:"sender",kind:"pi",session_id:randomUUID()});
+  store.send(sender,{to:identity.name,text:"private old session",idempotency_key:"old-host"});
+  store.bindSession("claude",process.pid,randomUUID());
+  assert.equal((await first.call("receive")).value.error.code,"SESSION_MISMATCH");
+  assert.equal(store.agent(identity.name)?.session_id,session);
+  await first.sdk.close();next=await client(undefined,"claude",project,state,[],undefined,true);
+  assert.notEqual((await next.call("whoami")).value.name,identity.name);
+  assert.equal((await next.call("receive")).value.messages.length,0);
+});
 
 test("three real stdio MCP processes share mail, identity, concurrent writes and ACK",{timeout:20000},async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-mcp-"));

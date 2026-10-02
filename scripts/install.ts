@@ -62,6 +62,9 @@ export function installation(project: string, options: { client?: string; name?:
   if (clients.some(c=>!["codex","claude","pi"].includes(c))) throw new MailError("INVALID_ARGUMENT","client must be codex, claude, pi or all.");
   if (options.name && clients.length !== 1) throw new MailError("INVALID_ARGUMENT","--name requires a single --client. Default names are assigned separately per live session.");
   if (options.name) validName(options.name);
+  if (clients.includes("pi") && options.piMode === "extension" && options.name) {
+    throw new MailError("INVALID_ARGUMENT","Pi extension role names use PEERLETTER_NAME when launching Pi; --name configures file MCP entries only.");
+  }
   if(options.wake && options.wake !== "none" && (clients.length !== 1 || ![
     "claude:claude-channel","codex:codex-queue"].includes(`${clients[0]}:${options.wake}`))) {
     throw new MailError("INVALID_WAKE","Use --client claude --wake claude-channel or --client codex --wake codex-queue.");

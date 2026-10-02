@@ -56,7 +56,7 @@ test("priority pagination does not lose earlier normal mail",t=>{
   assert.equal(second.messages[0].id,normal.id);
 });
 
-test("names collide only online; unscoped mail survives session replacement",t=>{
+test("explicit role names collide online and intentionally retain unscoped mail across sessions",t=>{
   const {a,b,sender,receiver} = fixture(t);
   assert.throws(()=>a.register({name:"receiver",kind:"claude",session_id:randomUUID()}),code("NAME_IN_USE"));
   assert.equal(a.register({kind:"claude",session_id:randomUUID()}).name,"claude");
@@ -70,6 +70,71 @@ test("names collide only online; unscoped mail survives session replacement",t=>
   const targeted = a.send(sender,{to:"receiver",text:"session-only",idempotency_key:"targeted",to_session:receiver.session_id});
   assert.equal(targeted.duplicate,true);
   assert.throws(()=>a.send(sender,{to:"receiver",text:"stale",idempotency_key:"stale",to_session:receiver.session_id}),code("SESSION_CHANGED"));
+});
+
+test("automatic names isolate different sessions and reuse the same host session for every kind",t=>{
+  const {a,b,sender}=fixture(t);
+  for(const kind of ["codex","claude","pi"]) {
+    const session=randomUUID();
+    const first=a.register({kind,session_id:session});
+    const mail=a.send(sender,{to:first.name,text:`private-${kind}`,idempotency_key:`private-${kind}`}).message;
+    b.closeAgent(first);
+    const other=b.register({kind,session_id:randomUUID()});
+    assert.notEqual(other.name,first.name);assert.equal(b.peek(other).messages.length,0);
+    assert.equal(a.peek(first).messages[0].id,mail.id);
+    const resumed=a.register({kind,session_id:session});
+    assert.equal(resumed.name,first.name);assert.equal(a.peek(resumed).messages[0].id,mail.id);
+    assert.equal(a.publicAgent(resumed).naming,"automatic");
+    assert.throws(()=>b.register({kind,session_id:session}),code("SESSION_IN_USE"));
+    const lease=a.leaseClaim(resumed,[`${kind}/**`]);
+    b.closeAgent(first);
+    assert.equal(a.agent(resumed.name)?.online,1,"Old runtime shutdown must not close its replacement");
+    assert.ok(a.leaseList().some(l=>l.id===lease.id));
+    a.closeAgent(resumed);b.closeAgent(other);
+  }
+});
+
+test("unbound automatic names never reuse an offline mailbox and peers expose binding state",t=>{
+  const {a}=fixture(t);
+  for(const kind of ["codex","claude","pi"]) {
+    const session=`runtime:${randomUUID()}`;
+    const first=a.register({kind,session_id:session});a.closeAgent(first);
+    const next=a.register({kind,session_id:session});
+    assert.notEqual(next.name,first.name);
+    assert.equal(a.publicAgent(next).session_binding.state,"unbound");
+    a.closeAgent(next);
+  }
+  const role=a.register({name:"persistent-role",kind:"pi",session_id:randomUUID()});
+  a.closeAgent(role);
+  const automatic=a.register({kind:"pi",session_id:role.session_id});
+  assert.notEqual(automatic.name,role.name,"Automatic allocation must not take an explicit role mailbox");
+});
+
+test("late binding cannot take an online host session or migrate state on a failed claim",t=>{
+  const {a,b}=fixture(t),session=randomUUID();
+  const owner=a.register({kind:"codex",session_id:session});
+  const fallback=b.register({kind:"codex",session_id:`runtime:${randomUUID()}`});
+  const original=fallback.session_id;
+  b.pause(original,"manual");const lease=b.leaseClaim(fallback,["fallback/**"]);
+  assert.throws(()=>b.updateSession(fallback,session,true,"mcp-metadata"),code("SESSION_IN_USE"));
+  assert.equal(fallback.session_id,original);assert.equal(b.agent(fallback.name)?.session_id,original);
+  assert.equal(b.leaseList().find(l=>l.id===lease.id)?.owner_session,original);
+  assert.equal(a.agent(owner.name)?.session_id,session);assert.equal(b.gate(original).pause_reason,"manual");
+});
+
+test("schema 1 migration preserves legacy mailboxes, messages and same-session names",t=>{
+  const {a,sender,project}=fixture(t),session=randomUUID();
+  const legacy=a.register({kind:"pi",session_id:session});
+  const mail=a.send(sender,{to:legacy.name,text:"legacy unread",idempotency_key:"legacy"}).message;
+  a.closeAgent(legacy);
+  a.run("DROP TABLE agent_bindings");a.run("PRAGMA user_version=1");
+  const upgraded=new Store(project);t.after(()=>upgraded.close());
+  assert.equal(upgraded.get<{user_version:number}>("PRAGMA user_version")?.user_version,2);
+  assert.equal(upgraded.publicAgent(upgraded.agent(legacy.name)!).naming,"legacy");
+  const other=upgraded.register({kind:"pi",session_id:randomUUID()});assert.notEqual(other.name,legacy.name);
+  const resumed=upgraded.register({kind:"pi",session_id:session});assert.equal(resumed.name,legacy.name);
+  assert.equal(upgraded.peek(resumed).messages[0].id,mail.id);
+  assert.equal(upgraded.status(sender,mail.id).state,"accepted");
 });
 
 test("long polls leave the write lock free and accept cancellation",async t=>{

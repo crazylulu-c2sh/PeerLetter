@@ -28,6 +28,14 @@ export interface Lease {
 }
 type SqlValue = string | number | null;
 
+export function hasHostSession(kind: string, session: string, source = "configured"): boolean {
+  if (source === "unbound" || kind === "cli" || /^(runtime|cli):/.test(session)) return false;
+  if (kind === "codex") {
+    try { validUuid(session); } catch { return false; }
+  }
+  return true;
+}
+
 const mailSelect = `SELECT m.*, d.state, d.notified_at, d.delivered_at, d.acked_at
   FROM messages m JOIN deliveries d ON d.message_id = m.id`;
 const priority = "CASE m.importance WHEN 'high' THEN 0 ELSE 1 END";
@@ -50,13 +58,18 @@ export class Store {
       this.db.exec("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
       this.transaction(() => {
         const version = Number(this.get<{ user_version: number }>("PRAGMA user_version")?.user_version || 0);
-        if (version > 1) throw new MailError("SCHEMA_TOO_NEW", "This database requires a newer PeerLetter checkout.");
+        if (version > 2) throw new MailError("SCHEMA_TOO_NEW", "This database requires a newer PeerLetter checkout.");
         this.db.exec(`
           CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS agents (
             name TEXT PRIMARY KEY, kind TEXT NOT NULL, session_id TEXT NOT NULL, runtime_id TEXT NOT NULL,
             pid INTEGER, proc_start TEXT, host_pid INTEGER, host_start TEXT, wake TEXT NOT NULL,
             wake_error TEXT, cwd TEXT NOT NULL, last_seen INTEGER NOT NULL, online INTEGER NOT NULL CHECK(online IN (0,1))
+          );
+          CREATE TABLE IF NOT EXISTS agent_bindings (
+            name TEXT PRIMARY KEY REFERENCES agents(name),
+            naming TEXT NOT NULL CHECK(naming IN ('automatic','explicit','legacy')),
+            session_source TEXT NOT NULL
           );
           CREATE TABLE IF NOT EXISTS sessions (
             kind TEXT NOT NULL, host_pid INTEGER NOT NULL, host_start TEXT, session_id TEXT NOT NULL,
@@ -92,7 +105,8 @@ export class Store {
             id TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES agents(name), owner_session TEXT NOT NULL,
             globs TEXT NOT NULL, exclusive INTEGER NOT NULL CHECK(exclusive IN (0,1)), expires_at INTEGER NOT NULL
           );
-          PRAGMA user_version=1;
+          INSERT OR IGNORE INTO agent_bindings SELECT name,'legacy','legacy' FROM agents;
+          PRAGMA user_version=2;
         `);
         const existing = this.get<{ value: string }>("SELECT value FROM metadata WHERE key='project'");
         if (existing && existing.value !== project.cwd) throw new MailError("PROJECT_MISMATCH", "Database belongs to another workspace.");
@@ -130,21 +144,37 @@ export class Store {
   }
 
   publicAgent(a: Agent) {
+    const binding = this.get<{naming:string;session_source:string}>("SELECT * FROM agent_bindings WHERE name=?",a.name);
+    const source = binding?.session_source || "legacy";
     return { name: a.name, kind: a.kind, session_id: a.session_id, online: !!a.online,
+      naming: binding?.naming || "legacy",
+      session_binding: { state: hasHostSession(a.kind,a.session_id,source) ? "bound" : "unbound", source },
       wake: a.wake, wake_error: a.wake_error, cwd: a.cwd, last_seen: a.last_seen,
       delivery_gate: this.gate(a.session_id) };
   }
 
-  register(input: { name?: string; kind: string; session_id: string; pid?: number; host_pid?: number; wake?: string }): Agent {
+  private assertSessionAvailable(kind: string, session: string, exceptName = ""): void {
+    const owner = this.get<Agent>("SELECT * FROM agents WHERE kind=? AND session_id=? AND online=1 AND name<>? LIMIT 1",kind,session,exceptName);
+    if (owner) throw new MailError("SESSION_IN_USE",`Host session is already owned by online agent ${owner.name}; close that MCP connection before reconnecting.`);
+  }
+
+  register(input: { name?: string; kind: string; session_id: string; pid?: number; host_pid?: number; wake?: string; session_source?: string }): Agent {
     if (input.name) validName(input.name);
     validName(input.kind);
     validSession(input.session_id);
     return this.transaction(() => {
       this.cleanPresence();
+      const source = input.session_source || (/^(runtime|cli):/.test(input.session_id) ? "unbound" : "configured");
+      const bound = hasHostSession(input.kind,input.session_id,source);
       let name = input.name || input.kind;
       if (input.name && this.agent(name)?.online) throw new MailError("NAME_IN_USE", `Agent ${name} is already online; choose a different name.`);
+      if (bound) this.assertSessionAvailable(input.kind,input.session_id);
       if (!input.name) {
-        for (let index = 2; this.agent(name)?.online; index++) name = `${input.kind}-${index}`;
+        const previous = bound ? this.get<Agent>(`SELECT a.* FROM agents a LEFT JOIN agent_bindings b ON b.name=a.name
+          WHERE a.kind=? AND a.session_id=? AND a.online=0 AND COALESCE(b.naming,'legacy')<>'explicit'
+          ORDER BY a.last_seen DESC,a.name LIMIT 1`,input.kind,input.session_id) : undefined;
+        if (previous) name = previous.name;
+        else for (let index = 2; this.agent(name); index++) name = `${input.kind}-${index}`;
       }
       const pid = input.pid ?? process.pid;
       const current: Agent = { name, kind: input.kind, session_id: input.session_id, runtime_id: randomUUID(),
@@ -158,6 +188,8 @@ export class Store {
         wake_error=NULL, cwd=excluded.cwd, last_seen=excluded.last_seen, online=1`,
         current.name, current.kind, current.session_id, current.runtime_id, current.pid, current.proc_start,
         current.host_pid, current.host_start, current.wake, null, current.cwd, current.last_seen, 1);
+      this.run(`INSERT INTO agent_bindings VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET
+        naming=excluded.naming,session_source=excluded.session_source`,name,input.name ? "explicit" : "automatic",source);
       this.run("INSERT OR IGNORE INTO wake_baselines VALUES(?,?,?)", name,current.session_id,this.maxSequence());
       return current;
     });
@@ -175,6 +207,7 @@ export class Store {
       const session_id = session || `cli:${name}`;
       this.run("INSERT INTO agents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", name, kind, session_id, randomUUID(),
         null, null, null, null, "none", null, this.project.cwd, Date.now(), 0);
+      this.run("INSERT INTO agent_bindings VALUES(?,?,?)",name,"explicit","unbound");
       return { name, session_id };
     });
   }
@@ -210,6 +243,10 @@ export class Store {
       kind, pid, processInfo(pid)?.start ?? null, session, cwd, Date.now());
   }
 
+  unbindSession(kind: string, pid: number, session: string): void {
+    this.run("DELETE FROM sessions WHERE kind=? AND host_pid=? AND session_id=?",kind,pid,session);
+  }
+
   sessionFor(kind: string, pids: number[]): string | undefined {
     for (const pid of pids) {
       const row = this.get<{ host_start: string | null; session_id: string }>("SELECT * FROM sessions WHERE kind=? AND host_pid=?", kind, pid);
@@ -223,11 +260,14 @@ export class Store {
       : this.get<Agent>("SELECT * FROM agents WHERE session_id=? AND online=1 ORDER BY last_seen DESC LIMIT 1", session);
   }
 
-  updateSession(actor: Actor, session: string, preserveRuntimeState = false): void {
-    this.assertActor(actor);
+  updateSession(actor: Actor, session: string, preserveRuntimeState = false, source = "configured"): void {
     validSession(session);
     this.transaction(() => {
+      const currentActor = this.assertActor(actor);
+      this.cleanPresence();
+      if (hasHostSession(currentActor.kind,session,source)) this.assertSessionAvailable(currentActor.kind,session,actor.name);
       this.run("UPDATE agents SET session_id=? WHERE name=? AND runtime_id=?", session, actor.name, actor.runtime_id || "");
+      this.run("UPDATE agent_bindings SET session_source=? WHERE name=?",source,actor.name);
       this.run("INSERT OR IGNORE INTO wake_baselines VALUES(?,?,?)",actor.name,session,
         preserveRuntimeState ? this.noticeBaseline(actor) : this.maxSequence());
       if(preserveRuntimeState) {
@@ -238,6 +278,15 @@ export class Store {
       }
     });
     actor.session_id = session;
+  }
+
+  setSessionSource(actor: Actor, source: string): void {
+    this.transaction(() => {
+      const current = this.assertActor(actor);
+      this.cleanPresence();
+      if (hasHostSession(current.kind,actor.session_id,source)) this.assertSessionAvailable(current.kind,actor.session_id,actor.name);
+      this.run("UPDATE agent_bindings SET session_source=? WHERE name=?",source,actor.name);
+    });
   }
 
   setWake(actor: Actor, mode: string, error: string | null = null): void {
