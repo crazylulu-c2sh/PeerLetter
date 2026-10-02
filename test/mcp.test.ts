@@ -11,6 +11,7 @@ import { z } from "zod";
 import { Store } from "../src/store.ts";
 import { resolveProject } from "../src/project.ts";
 import { startupRegistration } from "../src/runtime.ts";
+import { codexDaemon } from "./codex-fixture.ts";
 
 const script = fileURLToPath(new URL("../src/stdio.ts",import.meta.url));
 async function client(name: string | undefined, kind: string, project: string, state: string, extra: string[] = [], expectedReadyError?: string, lazy = false, env: Record<string,string> = {}) {
@@ -81,24 +82,27 @@ test("Claude host environment joins at initialization and wakes without a receiv
 
 test("Codex explicitly pinned connection queues a body-free wake before any tools/call",{timeout:10000},async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-queue-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
-  const log=path.join(root,"queue.json"),queue=path.join(root,"queue-fixture"),session=randomUUID();
-  fs.writeFileSync(queue,`#!${process.execPath}\nimport fs from 'node:fs';\nfs.writeFileSync(process.env.PEERLETTER_TEST_QUEUE_LOG,JSON.stringify(process.argv.slice(2)));\n`,{mode:0o700});
+  const session=randomUUID(),daemon=await codexDaemon(t,root,session);
   const store=new Store(resolveProject(project,state));
   const receiver=await client(undefined,"codex",project,state,["--wake","codex-queue","--session",session],undefined,true,
-    {PEERLETTER_CODEX_BIN:queue,PEERLETTER_TEST_QUEUE_LOG:log});
+    {PEERLETTER_CODEX_SOCKET:daemon.socket});
   t.after(async()=>{await receiver.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
   await receiver.sdk.listTools();
   const actor=store.agentForSession(session,"codex")!;assert.ok(actor);
   const sender=store.register({name:"sender",kind:"claude",session_id:randomUUID()});
   const mail=store.send(sender,{to:actor.name,text:"SECRET-QUEUE-BODY",idempotency_key:"queue-startup"}).message;
-  await eventually(()=>fs.existsSync(log),"Startup must invoke the queue adapter without receiver tool calls");
-  const args=JSON.parse(fs.readFileSync(log,"utf8"));assert.deepEqual(args.slice(0,4),["queue","--thread",session,"--message"]);
-  assert.match(args[4],/peerletter_receive/);assert.ok(!args[4].includes("SECRET-QUEUE-BODY"));
+  await eventually(()=>daemon.queued.length === 1,"Startup must invoke the queue adapter without receiver tool calls");
+  const input=daemon.queued[0].input[0].text;
+  assert.equal(daemon.calls.find(c=>c.method === "thread/read")!.params.threadId,session);
+  assert.match(input,/peerletter_receive/);assert.ok(!input.includes("SECRET-QUEUE-BODY"));
   await eventually(()=>store.status(sender,mail.id).state==="notified","Queue wake must be recorded");
   assert.equal(store.peek(actor).messages.length,1);
   const who=(await receiver.call("whoami",{},{threadId:session})).value;
   assert.equal(who.registration.mode,"startup");assert.equal(who.session_binding.source,"mcp-metadata");
   assert.equal((await receiver.call("whoami",{},{threadId:randomUUID()})).value.error.code,"SESSION_MISMATCH");
+  const received=(await receiver.call("receive",{},{threadId:session})).value;
+  assert.equal(received.messages[0].id,mail.id);assert.equal(daemon.queued.length,0,"Receive must withdraw pending owned wake before returning");
+  assert.equal(store.status(sender,mail.id).state,"delivered");
 });
 
 test("overwritten shared-PID Codex hooks and inherited IDs cannot register an unused wake connection",{timeout:10000},async t=>{

@@ -5,7 +5,8 @@ import { Runtime, startupRegistration } from "./runtime.ts";
 import type { HostBinding } from "./runtime.ts";
 import { parseOptions } from "./options.ts";
 import { MailError, errorResult } from "./errors.ts";
-import { MailWatcher, noticeText, queueCodex } from "./wake.ts";
+import { MailWatcher, noticeText } from "./wake.ts";
+import { CodexQueue } from "./codex.ts";
 import { configuredClaudeWake } from "./claude.ts";
 
 const instructions = `PeerLetter connects agents in one local workspace. Check your inbox at task start,
@@ -34,6 +35,7 @@ const server = new McpServer({ name: "peerletter", version: "0.1.0" }, {
 });
 let runtime: Runtime | undefined;
 let watcher: MailWatcher | undefined;
+let codexQueue: CodexQueue | undefined;
 let closing = false;
 let initialized = false;
 let startupRetry: ReturnType<typeof setTimeout> | undefined;
@@ -57,14 +59,16 @@ function join(meta?: Record<string,unknown>, recoverySession?: string, startup?:
     startupRetry = undefined;
     const active = candidate;
     if (wake === "claude-channel" || wake === "codex-queue") {
+      if (wake === "codex-queue") codexQueue = new CodexQueue(active.store,active.actor,()=>active.codexTarget());
       watcher = new MailWatcher(active.store, active.actor, wake, async messages => {
         const content = noticeText(messages);
         if (wake === "claude-channel") {
           if (active.actor.kind !== "claude") throw new MailError("WAKE_UNAVAILABLE", "Claude channels require a Claude client.");
           if ((configuredClaudeWake(active.store.project.cwd) ?? wake) !== wake) throw new MailError("WAKE_DISABLED","Claude wake mode changed; reload its MCP/plugin configuration.");
           await server.server.notification({ method: "notifications/claude/channel", params: { content } });
-        } else await queueCodex(active.codexTarget(), content);
-      }, { backlog: options.wakeBacklog, before: () => active.refresh() });
+        } else return codexQueue!.signal(messages);
+      }, { backlog: options.wakeBacklog, before: () => active.refresh(),
+        ...(codexQueue ? {maintain:()=>codexQueue!.reconcile()} : {}) });
       watcher.start();
     }
   }
@@ -99,6 +103,11 @@ function tool(name: string, description: string, schema: z.ZodRawShape, fn: (arg
     try {
       const r = current(extra._meta,name === "peerletter_bind_session" ? args.session_id : undefined);
       const result = await fn(args, r, AbortSignal.any([extra.signal, stopped.signal]));
+      if (codexQueue && (name === "peerletter_receive" || name === "peerletter_ack")) {
+        // Withdraw obsolete pending wake before returning a successful mailbox operation.
+        try { await codexQueue.reconcile(); }
+        catch (error) { r.store.setWake(r.actor,"codex-queue",error instanceof Error ? error.message : String(error)); }
+      }
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (error) { return { isError: true, content: [{ type: "text", text: JSON.stringify(errorResult(error)) }] }; }
   });
@@ -140,6 +149,7 @@ async function shutdown(code = 0): Promise<void> {
   if (startupRetry) clearTimeout(startupRetry);
   startupRetry = undefined;
   await watcher?.stop();
+  codexQueue?.close();
   // In-flight long polls check cancellation every 100 ms.
   await new Promise(resolve => setTimeout(resolve, 125));
   try { runtime?.close(); await server.close(); } finally { process.exit(code); }

@@ -98,7 +98,7 @@ export function installation(project: string, options: { client?: string; name?:
   for(const kind of clients) {
     if(kind === "codex") {
       const file=path.join(project,".codex/config.toml");
-      const snippet=`# BEGIN PeerLetter\n[mcp_servers.peerletter]\ncommand = ${JSON.stringify(node)}\nargs = ${JSON.stringify([...args,"--kind","codex"])}\nenv_vars = ["PEERLETTER_NAME", "CODEX_THREAD_ID"]\nstartup_timeout_sec = 10\ntool_timeout_sec = 45\n# END PeerLetter\n`;
+      const snippet=`# BEGIN PeerLetter\n[mcp_servers.peerletter]\ncommand = ${JSON.stringify(node)}\nargs = ${JSON.stringify([...args,"--kind","codex"])}\nenv_vars = ["PEERLETTER_NAME", "CODEX_THREAD_ID", "CODEX_HOME", "PEERLETTER_CODEX_SOCKET"]\nstartup_timeout_sec = 10\ntool_timeout_sec = 45\n# END PeerLetter\n`;
       writes.push({file,data:mergeToml(fs.existsSync(file)?fs.readFileSync(file,"utf8"):"",snippet)});
       const hookfile=path.join(project,".codex/hooks.json");
       writes.push({file:hookfile,data:json(mergeHooks(readJson(hookfile),kind,node,checkout))});

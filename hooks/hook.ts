@@ -27,7 +27,9 @@ try {
     for (const reason of store!.gate(session).blocked_reasons) if (reason.startsWith("elicitation")) store!.block(session,reason,false);
   };
   const elicitation=`elicitation:${input.mcp_server_name || "unknown"}:${input.elicitation_id || "form"}`;
-  const foreground = (actor: {wake:string}) => kind !== "claude" || (configuredClaudeWake(store!.project.cwd) ?? actor.wake) === "none";
+  const foreground = (actor: {wake:string;wake_error:string|null}) => kind === "claude"
+    ? (configuredClaudeWake(store!.project.cwd) ?? actor.wake) === "none"
+    : actor.wake !== "codex-queue" || !!actor.wake_error;
   if (event === "SessionStart") {
     if (host) store.bindSession(kind,host.pid,session);
     if (kind === "claude") { store.block(session,"session_end",false); store.block(session,"compact",false); clearUi(true); clearElicitation(); }

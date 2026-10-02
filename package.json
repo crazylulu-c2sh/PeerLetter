@@ -9,6 +9,7 @@
   "scripts": {
     "test": "node --test test/*.test.ts",
     "test:native-codex": "node scripts/native-codex-test.ts",
+    "test:native-codex-queue": "node scripts/native-codex-queue-test.ts",
     "test:native-claude": "python3 scripts/native-claude-test.py",
     "check": "tsc --noEmit",
     "stdio": "node src/stdio.ts",
@@ -17,11 +18,13 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
+    "ws": "8.22.0",
     "zod": "3.25.76"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.99.2",
     "@types/node": "24.10.1",
+    "@types/ws": "8.18.1",
     "typescript": "5.9.3"
   }
 }

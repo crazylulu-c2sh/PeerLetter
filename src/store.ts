@@ -26,6 +26,10 @@ export interface Lease {
   id: string; owner: string; owner_session: string; globs: string[];
   exclusive: boolean; expires_at: number;
 }
+export interface CodexWake {
+  session_id: string; agent_name: string; client_message_id: string;
+  queue_id: string | null; message_ids: string; input: string; created_at: number;
+}
 type SqlValue = string | number | null;
 
 export function hasHostSession(kind: string, session: string, source = "configured"): boolean {
@@ -108,6 +112,11 @@ export class Store {
           CREATE TABLE IF NOT EXISTS watch_owners (
             session_id TEXT PRIMARY KEY, token TEXT NOT NULL, sink TEXT NOT NULL,
             pid INTEGER NOT NULL, proc_start TEXT, started_at INTEGER NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS codex_wakes (
+            session_id TEXT PRIMARY KEY, agent_name TEXT NOT NULL REFERENCES agents(name),
+            client_message_id TEXT NOT NULL UNIQUE, queue_id TEXT,
+            message_ids TEXT NOT NULL, input TEXT NOT NULL, created_at INTEGER NOT NULL
           );
           INSERT OR IGNORE INTO agent_bindings SELECT name,'legacy','legacy' FROM agents;
           PRAGMA user_version=2;
@@ -456,17 +465,68 @@ export class Store {
     return this.all<Mail>(mailSelect + ` WHERE m.to_name=? AND (m.to_session IS NULL OR m.to_session=?)
       AND d.state IN ('accepted','notified') AND m.seq>?
       AND NOT EXISTS(SELECT 1 FROM notices n WHERE n.message_id=m.id AND n.session_id=?)
-      ORDER BY ${priority},m.seq LIMIT 20`, actor.name, actor.session_id, afterSequence, actor.session_id);
+      AND NOT EXISTS(SELECT 1 FROM codex_wakes w,json_each(w.message_ids) j
+        WHERE w.session_id=? AND w.agent_name=m.to_name AND j.value=m.id)
+      ORDER BY ${priority},m.seq LIMIT 20`, actor.name, actor.session_id, afterSequence, actor.session_id, actor.session_id);
   }
 
   markNotified(actor: Actor, sink: string, ids: string[]): void {
+    this.transaction(() => this.recordNotified(actor,sink,ids));
+  }
+
+  private recordNotified(actor: Actor, sink: string, ids: string[]): void {
+    for (const id of ids) {
+      const message = this.read(actor, id);
+      if (message.to_name !== actor.name) throw new MailError("NOTICE_DIRECTION_MISMATCH", "Cannot notify for another inbox.");
+      this.run("INSERT OR IGNORE INTO notices VALUES(?,?,?,?)", id, actor.session_id, sink, Date.now());
+      this.run("UPDATE deliveries SET state=CASE WHEN state='accepted' THEN 'notified' ELSE state END,notified_at=COALESCE(notified_at,?) WHERE message_id=?", Date.now(), id);
+    }
+  }
+
+  codexWake(actor: Actor): CodexWake | undefined {
+    this.assertActor(actor);
+    return this.get<CodexWake>("SELECT * FROM codex_wakes WHERE session_id=? AND agent_name=?",actor.session_id,actor.name);
+  }
+
+  beginCodexWake(actor: Actor, messages: Mail[], text: (mail: Mail[]) => string): CodexWake | undefined {
+    return this.transaction(() => {
+      if (this.codexWake(actor) || this.gate(actor.session_id).state !== "ready") return;
+      const wanted = new Set(messages.map(m=>m.id));
+      const fresh = this.pendingNotices(actor,"codex-queue").filter(m=>wanted.has(m.id));
+      if (!fresh.length) return;
+      const client = `peerletter:${this.project.key}:${actor.session_id}:${randomUUID()}`;
+      this.run("INSERT INTO codex_wakes VALUES(?,?,?,?,?,?,?)",actor.session_id,actor.name,client,null,
+        JSON.stringify(fresh.map(m=>m.id)),text(fresh),Date.now());
+      return this.codexWake(actor);
+    });
+  }
+
+  finishCodexWake(actor: Actor, client: string, queue: string): void {
     this.transaction(() => {
-      for (const id of ids) {
-        const message = this.read(actor, id);
-        if (message.to_name !== actor.name) throw new MailError("NOTICE_DIRECTION_MISMATCH", "Cannot notify for another inbox.");
-        this.run("INSERT OR IGNORE INTO notices VALUES(?,?,?,?)", id, actor.session_id, sink, Date.now());
-        this.run("UPDATE deliveries SET state=CASE WHEN state='accepted' THEN 'notified' ELSE state END,notified_at=COALESCE(notified_at,?) WHERE message_id=?", Date.now(), id);
+      const row = this.codexWake(actor);
+      if (!row || row.client_message_id !== client) throw new MailError("WAKE_OWNERSHIP_CHANGED","Codex wake intent changed.");
+      if (row.queue_id && row.queue_id !== queue) throw new MailError("WAKE_OWNERSHIP_CHANGED","Codex queue ID changed.");
+      this.run("UPDATE codex_wakes SET queue_id=? WHERE session_id=? AND client_message_id=?",queue,actor.session_id,client);
+      this.recordNotified(actor,"codex-queue",JSON.parse(row.message_ids));
+    });
+  }
+
+  codexWakeUnread(actor: Actor, row: CodexWake): Mail[] {
+    this.assertActor(actor);
+    return this.all<Mail>(mailSelect + ` WHERE m.to_name=? AND (m.to_session IS NULL OR m.to_session=?)
+      AND d.state IN ('accepted','notified') AND m.id IN (SELECT value FROM json_each(?))`,actor.name,actor.session_id,row.message_ids);
+  }
+
+  clearCodexWake(actor: Actor, client: string, retryUnread: boolean): void {
+    this.transaction(() => {
+      const row = this.codexWake(actor);
+      if (!row || row.client_message_id !== client) return;
+      if (retryUnread) for (const id of JSON.parse(row.message_ids) as string[]) {
+        this.run("DELETE FROM notices WHERE message_id=? AND session_id=? AND sink='codex-queue'",id,actor.session_id);
+        this.run(`UPDATE deliveries SET state='accepted' WHERE message_id=? AND state='notified'
+          AND NOT EXISTS(SELECT 1 FROM notices WHERE message_id=?)`,id,id);
       }
+      this.run("DELETE FROM codex_wakes WHERE session_id=? AND client_message_id=?",actor.session_id,client);
     });
   }
 
