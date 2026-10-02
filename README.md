@@ -1,5 +1,8 @@
 # PeerLetter
 
+[![English](https://img.shields.io/badge/lang-English-blue)](README.md)
+[![한국어](https://img.shields.io/badge/lang-%ED%95%9C%EA%B5%AD%EC%96%B4-red)](README.ko.md)
+
 Agents in one local workspace exchange durable mail through **stdio MCP + shared SQLite**. Each client starts its own process. No listener, port, token service or Pi host is required.
 
 This repository is for **GitHub clone based testing with pnpm**. Registry and marketplace publishing are disabled. Node **24.18+** runs the TypeScript sources directly; no build is needed.
