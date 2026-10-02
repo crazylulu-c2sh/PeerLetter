@@ -69,7 +69,19 @@ By default all three use manual inbox checks. After connecting, call `peerletter
 
 ### Participation and mailbox names
 
-All clients join on their **first PeerLetter tool call**. MCP initialization and `tools/list` do not register a participant, reserve a name or start a wake watcher. This includes unused loaded threads, headless clients and subagents. Call `peerletter_whoami` to join before exchanging mail or expecting automatic wake. Hooks tolerate sessions that have not joined. The Pi extension also waits for a tool call; it never calls whoami during startup.
+With `wake=none`, clients join on their **first PeerLetter tool call**. Initialization and `tools/list` do not reserve a name or start a watcher, even when a host session ID is known. This keeps unused manual clients, loaded threads and subagents out of presence. Hooks tolerate sessions that have not joined.
+
+With an opt-in wake adapter, a connection whose actual host session is known joins after MCP initialization and starts its wake adapter **without a tool call**:
+
+| Client | Identity accepted for startup registration |
+|---|---|
+| Claude channel | `CLAUDE_CODE_SESSION_ID`, or an explicitly configured session |
+| Pi extension | The actual session ID the extension supplies with `--session`; Pi connects extension MCP servers at startup |
+| Codex queue | An explicit `--session <thread UUID>` that deliberately pins this MCP connection |
+
+Missing, invalid or temporary identities stay lazy. Claude's PID registry and hook-only identities are not used for startup registration. Codex's inherited `CODEX_THREAD_ID`/`PEERLETTER_SESSION_ID` and PID hook mappings cannot prove which shared-daemon thread loaded an unused connection. The mapping table stores only the latest session for a PID; **one row does not establish one thread**. Normal Codex connections therefore still need their first tool call's native `_meta.threadId`. Do not add a fixed `--session` to shared configuration used by unrelated threads; reserve it for a deliberately managed connection.
+
+Call `peerletter_whoami` to inspect the exact name, binding and wake status. `registration.mode` is `startup` or `tool-call`. Eligible startup registration failures are logged to stderr and retried with bounded backoff; tool calls report the original error and can also retry. A live owner is never displaced. Reload must close the old connection before its replacement can own the same session. Startup participation does not grant host channel permission or hook trust.
 
 Automatic names (`codex`, `codex-2`, `claude`, `pi`, etc.) are reserved for their original host session. A reconnect with the same bound session ID reuses its offline automatic name. A different session gets a new unused name, including when the old process is offline and its inbox has unread mail. Unbound `runtime:...` identities cannot reuse an old automatic name. Always use the exact name returned by whoami.
 
@@ -89,7 +101,7 @@ For older clients that omit native thread metadata, read **your own** `CODEX_THR
 
 To recover an automatic name on an older client without another identity source, make `peerletter_bind_session` your first PeerLetter call. An initial unbound whoami allocates a fresh mailbox; binding it later preserves that mailbox's address, pause, leases and wake baseline.
 
-If you want to continue an existing Codex conversation, you can launch directly with `codex resume <thread-id>` or `codex resume --last`. This is an optional starting method; participant registration still waits for a PeerLetter tool call.
+If you want to continue an existing Codex conversation, you can launch directly with `codex resume <thread-id>` or `codex resume --last`. Normal shared-daemon connections still wait for a PeerLetter tool call to identify the resumed thread, including when queue wake is configured.
 
 If a configured name is already online, tools return `NAME_IN_USE` with an actionable message. Retry after the owner disconnects, or restart with another name for a different session. A failed registration does not hide the cause behind `NOT_READY` or permanently prevent retry.
 
@@ -127,6 +139,8 @@ claude --dangerously-load-development-channels server:peerletter
 
 This opts into the experimental `claude/channel` capability and `notifications/claude/channel`. The development flag is required for this local server; it is not a published marketplace plugin. Check account and version availability in the [official channels documentation](https://code.claude.com/docs/en/channels-reference). Stop hooks provide a body-free fallback while a turn is already ending; they cannot start an idle session on their own.
 
+When the restarted MCP inherits `CLAUDE_CODE_SESSION_ID`, it registers and watches without an initial whoami call. If the actual session cannot be identified at initialization, call whoami once to join. A saved `--wake` flag alone does not bypass channel enablement in the Claude host.
+
 ### Codex queue
 
 ```bash
@@ -138,6 +152,8 @@ This adapter uses the installed `codex queue --thread UUID --message ...` comman
 
 The Interrupt hook records a user pause, which blocks queue wake even for high priority mail. New explicit user input or CLI `resume` clears it. This protection depends on that hook running; an unreviewed or disabled Interrupt hook cannot report the host's pause state.
 
+Startup queue registration requires a connection pinned with `--session <your actual thread UUID>`. Shared-daemon PID mappings and inherited environment IDs remain insufficient for startup registration, even after approving SessionStart hooks. In the normal installer configuration, restart and call whoami once; the first tool request supplies the actual thread. Restart alone cannot guarantee automatic wake for an unidentified Codex thread.
+
 ### Pi extension
 
 ```bash
@@ -147,7 +163,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
 
 Reload Pi or start a new session. The extension dynamically registers the same stdio MCP core and binds the actual Pi session ID. The installer removes its own file MCP entry so it cannot override this registration. Do not retain a global `mcp.json` entry named `peerletter` when using the extension; Pi gives file configuration precedence. You can instead launch with `pi -e ~/dev/PeerLetter/pi/peerletter.ts --skill ~/dev/PeerLetter/skills/peerletter`.
 
-The default file MCP mode has no Pi session ID and cannot observe `/new`; whoami reports it as `unbound`. Use extension mode for real session identity and transitions. On `/new`, resume, fork, reload or quit, the extension closes only its own participant, releases its leases and stops polling. The next session joins on its first tool call. Resuming the same actual session reuses its offline automatic name; `/new` receives a different automatic name. A role name set explicitly continues its durable inbox. Loading the same session in another Pi process does not grant ownership of the first process's participant.
+The default file MCP mode has no Pi session ID and cannot observe `/new`; whoami reports it as `unbound`. Use extension mode for real session identity and transitions. On `/new`, resume, fork, reload or quit, the extension closes only its own participant, releases its leases and stops polling. The next session's MCP joins at initialization, and its extension can notify without an initial tool call. The extension does not allocate another participant or call whoami internally. Resuming the same actual session reuses its offline automatic name; `/new` receives a different automatic name. A role name set explicitly continues its durable inbox. Loading the same session in another Pi process does not grant ownership of the first process's participant.
 
 The extension watches the inbox and sends a body-free `pi.sendMessage(..., {triggerTurn:true, deliverAs:'steer'})`. Manual pause, abort, provider errors, UI dialogs and compaction gate injection. `/peerletter pause`, `/peerletter resume` and `/peerletter status` control or inspect it. New explicit user input resumes a pause. The adapter targets the installed Pi 0.99.2 extension API; see [Pi extensions documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md).
 
@@ -189,7 +205,7 @@ Read the shared [collaboration skill](skills/peerletter/SKILL.md) for inbox timi
 
 `pnpm run check` checks core, hook, script and Pi extension types. `pnpm test` covers shared SQLite semantics and launches real SDK stdio clients as Codex, Claude and Pi. Tests use temporary state, not live agent mailboxes. The GitHub Actions workflow runs from a clean checkout on Node 24, installs the frozen pnpm lockfile, checks types and runs tests. It has no publishing step.
 
-The suite checks concurrent writes, deduplication, reply direction, priority cursors, atomic ACK ownership, cancellation, leases, durable restart, SIGKILL presence, permissions, notification gates and Claude channel framing. It also covers lazy registration for all clients, first-call Codex identity, same-session name recovery, mail isolation between different sessions, schema 1 migration, live-owner protection, Pi `/new`/resume using real stdio MCP clients, explicit recovery, name-collision errors and Claude mid-turn hooks. Tests never send mail to running agents.
+The suite checks concurrent writes, deduplication, reply direction, priority cursors, atomic ACK ownership, cancellation, leases, durable restart, SIGKILL presence, permissions, notification gates and Claude channel framing. It also covers manual lazy registration for all clients, conditional startup registration, Claude/Pi wake before any receiver tool call, the Codex queue adapter with a local recording executable, ambiguous shared-PID hook mappings, first-call Codex identity, same-session name recovery, mail isolation, schema 1 migration, live-owner protection, Pi `/new`/resume using real stdio MCP clients, explicit recovery, registration retry and Claude mid-turn hooks. Tests never send mail to running agents. Recording a queue command proves adapter invocation, not that an actual idle Codex TUI wakes.
 
 `pnpm run test:native-codex` runs a regression for an installed Codex executable. It runs real `codex exec` against a loopback mock Responses provider in an isolated configuration, strips `CODEX_THREAD_ID` from the MCP environment, and verifies native metadata binds the same thread ID that Codex emits. GitHub Actions runs it with Codex 0.159.3 temporarily installed using pnpm. No external model or production mailbox is used. This installed-client test is separate from the default SDK suite and does not prove that an idle TUI wakes. Try opt-in wake adapters in their actual interactive clients after completing host setup.
 

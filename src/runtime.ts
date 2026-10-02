@@ -3,11 +3,39 @@ import { agentKind, ancestors, claudeSession, hostProcess, isProcessAlive } from
 import { resolveProject } from "./project.ts";
 import { Store, hasHostSession } from "./store.ts";
 import type { Agent } from "./store.ts";
-import { MailError, validUuid } from "./errors.ts";
+import { MailError, validSession, validUuid } from "./errors.ts";
 
 export interface RuntimeOptions {
   project?: string; name?: string; kind?: string; session?: string; wake?: string;
   state?: string; wakeBacklog?: boolean;
+}
+
+export interface HostBinding { session_id: string; source: string }
+
+// This probe must not open the database or allocate a name. A PID mapping can be
+// the last of several Codex threads, even when the table contains just one row.
+export function startupRegistration(clientName: string, options: RuntimeOptions = {}, env: NodeJS.ProcessEnv = process.env): { binding?: HostBinding; reason: string } {
+  const kind = options.kind || env.PEERLETTER_KIND || agentKind(clientName);
+  const wake = options.wake || env.PEERLETTER_WAKE || "none";
+  if (wake === "none") return { reason: "Wake is disabled; join on the first tool call." };
+  const expected: Record<string,string> = { claude:"claude-channel", codex:"codex-queue", pi:"pi-extension" };
+  if (expected[kind] !== wake) return { reason: "Wake adapter does not match the client kind; join on the first tool call." };
+
+  // An explicit --session pins this MCP connection. Inherited Codex environment
+  // variables and hook records cannot prove which shared-daemon thread loaded it.
+  const configured = options.session || (kind !== "codex" ? env.PEERLETTER_SESSION_ID : undefined);
+  const environment = kind === "claude" ? env.CLAUDE_CODE_SESSION_ID : undefined;
+  const session = configured || environment;
+  if (!session) return { reason: kind === "codex"
+    ? "Codex thread is not verified for this connection; wait for native threadId metadata or an explicit --session."
+    : "No verified host session is available at startup; join on the first tool call." };
+  const source = configured ? "configured" : "environment";
+  try {
+    validSession(session);
+    if (!hasHostSession(kind,session,source)) throw new Error("Unbound identity");
+    if (kind === "codex") validUuid(session,"INVALID_THREAD_ID");
+  } catch { return { reason: "Startup host session is invalid or unbound; join on the first tool call." }; }
+  return { binding: {session_id:session,source}, reason: "Wake is enabled and this connection has a verified host session." };
 }
 
 export class Runtime {
@@ -17,11 +45,14 @@ export class Runtime {
   private hostPids: number[];
   private closed = false;
   private sessionSource: string;
+  private registrationMode: "startup" | "tool-call";
 
-  constructor(clientName: string, options: RuntimeOptions = {}, meta?: Record<string,unknown>, recoverySession?: string) {
+  constructor(clientName: string, options: RuntimeOptions = {}, meta?: Record<string,unknown>, recoverySession?: string, startup?: HostBinding) {
     this.options = options;
+    this.registrationMode = startup ? "startup" : "tool-call";
     const kind = options.kind || process.env.PEERLETTER_KIND || agentKind(clientName);
     const configured = options.session || process.env.PEERLETTER_SESSION_ID;
+    if (kind === "codex" && configured) validUuid(configured,"INVALID_THREAD_ID");
     const native = kind === "codex" && meta?.threadId !== undefined ? validUuid(String(meta.threadId),"INVALID_THREAD_ID") : undefined;
     const recovery = kind === "codex" && recoverySession ? validUuid(recoverySession,"INVALID_THREAD_ID") : undefined;
     if (native && configured && native !== configured) throw new MailError("SESSION_MISMATCH","Configured session differs from the calling Codex thread.");
@@ -33,8 +64,8 @@ export class Runtime {
     const environment = kind === "codex" ? process.env.CODEX_THREAD_ID : registry?.session_id;
     const mapped = this.store.sessionFor(kind,this.hostPids);
     const hooked = mapped && hasHostSession(kind,mapped,"hook") ? mapped : undefined;
-    const session = native || configured || environment || hooked || recovery || `runtime:${randomUUID()}`;
-    this.sessionSource = native ? "mcp-metadata" : configured ? "configured" : environment ? "environment" : hooked ? "hook" : recovery ? "self-binding" : "unbound";
+    const session = native || startup?.session_id || configured || environment || hooked || recovery || `runtime:${randomUUID()}`;
+    this.sessionSource = native ? "mcp-metadata" : startup ? startup.source : configured ? "configured" : environment ? "environment" : hooked ? "hook" : recovery ? "self-binding" : "unbound";
     const wake = options.wake || process.env.PEERLETTER_WAKE || "none";
     if (!["none", "claude-channel", "codex-queue", "pi-extension"].includes(wake)) {
       this.store.close(); throw new MailError("INVALID_WAKE", "Use none, claude-channel, codex-queue or pi-extension.");
@@ -115,6 +146,7 @@ export class Runtime {
           next: "Call peerletter_whoami from Codex (native request metadata), or review /hooks and restart; if needed read your own CODEX_THREAD_ID and use peerletter_bind_session." }
           : this.actor.kind === "pi" && !bound ? { reason:"Manual MCP has no Pi session identity and cannot observe /new.",
             next:"Use the session-bound Pi extension for actual session IDs and /new transitions; call whoami after reloading." } : {}) },
+      registration: { mode:this.registrationMode },
       protocol: "stdio", delivery: "at-least-once", ack_means: "processed; completion requires a reply" };
   }
 

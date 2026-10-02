@@ -160,12 +160,31 @@ function piRig(t:test.TestContext,project:string,state:string) {
   return {start,call,shutdown,cleanup,handlers,notices,closing};
 }
 
+test("Pi startup wakes without tools/call and keeps UI and compaction gates",{timeout:10000},async t=>{
+  const {root,project}=temp(t),state=path.join(root,"state"),session=randomUUID();
+  const rig=piRig(t,project,state),store=new Store(resolveProject(project,state));
+  try {
+    const sdk=await rig.start("startup",session),receiver=store.agentForSession(session,"pi")!;
+    assert.ok(receiver);assert.equal(receiver.host_pid,process.pid);
+    const sender=store.register({name:"sender",kind:"claude",session_id:randomUUID()});
+    await rig.handlers.get("ui_prompt_start")!({});await rig.handlers.get("session_before_compact")!({});
+    const mail=store.send(sender,{to:receiver.name,text:"SECRET-PI-STARTUP",importance:"high",idempotency_key:"startup-pi"}).message;
+    await new Promise(resolve=>setTimeout(resolve,850));assert.equal(rig.notices.length,0);
+    await rig.handlers.get("ui_prompt_end")!({});assert.equal(rig.notices.length,0);
+    await rig.handlers.get("session_compact")!({});assert.equal(rig.notices.length,1);
+    assert.ok(!rig.notices[0].content.includes("SECRET-PI-STARTUP"));assert.match(rig.notices[0].content,/peerletter_receive/);
+    assert.equal(store.status(sender,mail.id).state,"notified");assert.equal(store.peek(receiver).messages.length,1);
+    assert.equal((await rig.call(sdk,"whoami")).registration.mode,"startup");
+    await rig.handlers.get("ui_prompt_end")!({});assert.equal(rig.notices.length,1);
+  } finally {await rig.cleanup();store.close();}
+});
+
 test("Pi extension /new isolates mail and leases; resume reuses the real session's name",{timeout:15000},async t=>{
   const {root,project}=temp(t),state=path.join(root,"state"),session=randomUUID();
   const rig=piRig(t,project,state),store=new Store(resolveProject(project,state));
   try {
     const first=await rig.start("startup",session);
-    assert.equal(store.peers().length,0,"Extension startup and tool discovery must not join");
+    assert.equal(store.peers().length,1,"The session-bound wake MCP must join at startup without tools/call");
     const original=await rig.call(first,"whoami");
     assert.equal(original.session_id,session);assert.equal(original.session_binding.state,"bound");
     const actor=store.agent(original.name)!;assert.equal(actor.host_pid,process.pid);
@@ -177,7 +196,7 @@ test("Pi extension /new isolates mail and leases; resume reuses the real session
     assert.equal(store.agent(original.name)?.online,0);assert.equal(store.leaseList().some(l=>l.id===lease.id),false);
     assert.equal(store.sessionFor("pi",[process.pid]),undefined,"A closed adapter must not leave a stale host mapping");
     const nextSession=randomUUID(),next=await rig.start("new",nextSession);
-    assert.equal(store.peers().filter(p=>p.kind === "pi" && p.online).length,0);
+    assert.equal(store.peers().filter(p=>p.kind === "pi" && p.online).length,1);
     const nextIdentity=await rig.call(next,"whoami");
     assert.notEqual(nextIdentity.name,original.name);assert.equal(nextIdentity.session_id,nextSession);
     assert.equal((await rig.call(next,"receive")).messages.length,0);

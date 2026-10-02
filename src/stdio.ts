@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { Runtime } from "./runtime.ts";
+import { Runtime, startupRegistration } from "./runtime.ts";
+import type { HostBinding } from "./runtime.ts";
 import { parseOptions } from "./options.ts";
 import { MailError, errorResult } from "./errors.ts";
 import { MailWatcher, noticeText, queueCodex } from "./wake.ts";
@@ -12,9 +13,13 @@ work outside the user's task. Receive does not ACK: ACK only after processing; A
 requested work is complete. Use full UUIDs for reply_to and stable idempotency keys for retries.
 Do not automatically reply to every message. High importance changes ordering and never bypasses pause.
 Use leases before editing shared files and coordinate git writes with the other agents.
-Every client: call peerletter_whoami once to join; initialize/tools/list do not register a participant.
+Manual clients join on their first tool call. With wake enabled, a verified connection-specific host
+session joins after initialization, including the session-bound Pi extension. Call whoami to inspect
+your name, registration.mode, session_binding and wake status. Uncertain identities stay lazy.
 Automatic names are reused only for the same bound host session. Use your exact returned name.
-Codex: native threadId metadata binds your real session before first registration.
+Normal Codex connections wait for the first request's native threadId metadata. Shared PID mappings
+and inherited Codex environment IDs do not permit startup registration; only a deliberately pinned
+--session can join early. Native metadata must agree with an existing bound session.
 If session_binding.state is unbound, read your own CODEX_THREAD_ID from the host shell and use
 peerletter_bind_session, or review /hooks and start a new session. Never guess a thread ID.`;
 const { runtime: options, values } = parseOptions();
@@ -30,19 +35,25 @@ let runtime: Runtime | undefined;
 let watcher: MailWatcher | undefined;
 let closing = false;
 let initialized = false;
+let startupRetry: ReturnType<typeof setTimeout> | undefined;
+let startupFailures = 0;
+let startupError = "";
 const stopped = new AbortController();
 
 server.server.oninitialized = () => {
   initialized = true;
+  const decision = startupRegistration(server.server.getClientVersion()?.name || "",options);
+  if (decision.binding) tryStartup(decision.binding);
+  else if (wake !== "none") console.error(`PeerLetter startup registration deferred: ${decision.reason}`);
 };
 
-function current(meta?: Record<string,unknown>, recoverySession?: string): Runtime {
+function join(meta?: Record<string,unknown>, recoverySession?: string, startup?: HostBinding): Runtime {
   if (!initialized || closing) throw new MailError("NOT_READY", "The MCP session is not initialized.");
   if (!runtime) {
-    // Listing tools can happen for unused threads or subagents. Allocate a mailbox only
-    // when an actual tool call arrives, after validating this call's host identity.
-    const candidate = new Runtime(server.server.getClientVersion()?.name || "",options,meta,recoverySession);
+    const candidate = new Runtime(server.server.getClientVersion()?.name || "",options,meta,recoverySession,startup);
     runtime = candidate;
+    if (startupRetry) clearTimeout(startupRetry);
+    startupRetry = undefined;
     const active = candidate;
     if (wake === "claude-channel" || wake === "codex-queue") {
       watcher = new MailWatcher(active.store, active.actor, wake, async messages => {
@@ -55,6 +66,26 @@ function current(meta?: Record<string,unknown>, recoverySession?: string): Runti
       watcher.start();
     }
   }
+  return runtime;
+}
+function tryStartup(binding: HostBinding): void {
+  if (closing || runtime) return;
+  try { join(undefined,undefined,binding); }
+  catch (error) {
+    const detail = errorResult(error);
+    const signature = JSON.stringify(detail);
+    if (signature !== startupError) console.error(`PeerLetter startup registration failed: ${signature}`);
+    startupError = signature;
+    // Reload can initialize the replacement before the old connection closes.
+    // Retry an eligible identity without taking a live owner's name or session.
+    startupFailures++;
+    startupRetry = setTimeout(() => { startupRetry = undefined; tryStartup(binding); },
+      Math.min(30000, 250 * 2 ** Math.min(startupFailures - 1,7)));
+    startupRetry.unref();
+  }
+}
+function current(meta?: Record<string,unknown>, recoverySession?: string): Runtime {
+  const runtime = join(meta,recoverySession);
   runtime.observeRequest(meta);
   runtime.refresh(); return runtime;
 }
@@ -104,6 +135,8 @@ tool("peerletter_lease_list", "List unexpired leases before editing shared files
 async function shutdown(code = 0): Promise<void> {
   if (closing) return;
   closing = true; stopped.abort();
+  if (startupRetry) clearTimeout(startupRetry);
+  startupRetry = undefined;
   await watcher?.stop();
   // In-flight long polls check cancellation every 100 ms.
   await new Promise(resolve => setTimeout(resolve, 125));

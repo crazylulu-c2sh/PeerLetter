@@ -10,11 +10,12 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { z } from "zod";
 import { Store } from "../src/store.ts";
 import { resolveProject } from "../src/project.ts";
+import { startupRegistration } from "../src/runtime.ts";
 
 const script = fileURLToPath(new URL("../src/stdio.ts",import.meta.url));
-async function client(name: string | undefined, kind: string, project: string, state: string, extra: string[] = [], expectedReadyError?: string, lazy = false) {
+async function client(name: string | undefined, kind: string, project: string, state: string, extra: string[] = [], expectedReadyError?: string, lazy = false, env: Record<string,string> = {}) {
   const transport = new StdioClientTransport({ command: process.execPath,
-    args: [script,"--project",project,...(name ? ["--name",name] : []),"--state",state,...extra], stderr: "pipe" });
+    args: [script,"--project",project,...(name ? ["--name",name] : []),"--state",state,...extra], env, stderr: "pipe" });
   const sdk = new Client({ name: kind, version: "test" });
   let errors = ""; transport.stderr?.on("data",chunk=>{errors+=String(chunk);});
   await sdk.connect(transport);
@@ -31,6 +32,164 @@ async function client(name: string | undefined, kind: string, project: string, s
   }
   return { sdk,transport,call,errors:()=>errors };
 }
+
+async function eventually(check:()=>boolean, reason:string) {
+  for(let i=0;i<200;i++) { if(check()) return; await new Promise(resolve=>setTimeout(resolve,25)); }
+  assert.ok(check(),reason);
+}
+
+test("startup probe requires opt-in wake and connection-specific identity without reserving names",()=>{
+  const session=randomUUID();
+  for(const [kind,wake] of [["claude","claude-channel"],["codex","codex-queue"],["pi","pi-extension"]]) {
+    assert.equal(startupRegistration(kind,{kind,session},{}).binding,undefined);
+    assert.equal(startupRegistration(kind,{kind,session,wake:"none"},{PEERLETTER_WAKE:wake}).binding,undefined);
+    assert.equal(startupRegistration(kind,{kind,session,wake},{}).binding?.session_id,session);
+    assert.equal(startupRegistration(kind,{kind,session:"runtime:temporary",wake},{}).binding,undefined);
+    assert.equal(startupRegistration(kind,{kind,session:"x".repeat(257),wake},{}).binding,undefined);
+  }
+  assert.equal(startupRegistration("claude",{wake:"claude-channel"},{CLAUDE_CODE_SESSION_ID:session}).binding?.source,"environment");
+  assert.equal(startupRegistration("codex",{wake:"codex-queue"},{CODEX_THREAD_ID:session,PEERLETTER_SESSION_ID:session}).binding,undefined);
+  assert.equal(startupRegistration("pi",{wake:"claude-channel",session},{}).binding,undefined);
+  assert.equal(startupRegistration("claude",{wake:"claude-channel"},{}).binding,undefined);
+  assert.equal(startupRegistration("pi",{wake:"pi-extension"},{}).binding,undefined);
+});
+
+test("Claude host environment joins at initialization and wakes without a receiver tool call",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-channel-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state)),session=randomUUID();
+  const receiver=await client(undefined,"claude-code",project,state,["--wake","claude-channel"],undefined,true,{CLAUDE_CODE_SESSION_ID:session});
+  t.after(async()=>{await receiver.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
+  const notices:string[]=[];
+  receiver.sdk.setNotificationHandler(z.object({method:z.literal("notifications/claude/channel"),params:z.object({content:z.string()})}),n=>{notices.push(n.params.content);});
+  await receiver.sdk.listTools();
+  const actor=store.agentForSession(session,"claude")!;assert.ok(actor);assert.equal(actor.wake,"claude-channel");
+  const sender=store.register({name:"sender",kind:"pi",session_id:randomUUID()});
+  store.pause(session,"manual");
+  const mail=store.send(sender,{to:actor.name,text:"SECRET-STARTUP-BODY",importance:"high",idempotency_key:"startup"}).message;
+  await new Promise(resolve=>setTimeout(resolve,850));assert.equal(notices.length,0);
+  store.block(session,"ui",true);store.pause(session,null);
+  await new Promise(resolve=>setTimeout(resolve,850));assert.equal(notices.length,0);
+  store.block(session,"ui",false);
+  await eventually(()=>notices.length===1,"Startup channel must signal before tools/call");
+  assert.ok(!notices[0].includes("SECRET-STARTUP-BODY"));assert.match(notices[0],/peerletter_receive/);
+  await eventually(()=>store.status(sender,mail.id).state==="notified","Channel notification receipt follows sending the signal");
+  assert.equal(store.status(sender,mail.id).state,"notified");assert.equal(store.peek(actor).messages.length,1);
+  await new Promise(resolve=>setTimeout(resolve,850));assert.equal(notices.length,1);
+  const identity=(await receiver.call("whoami")).value;
+  assert.equal(identity.registration.mode,"startup");assert.equal(identity.session_binding.source,"environment");
+});
+
+test("Codex explicitly pinned connection queues a body-free wake before any tools/call",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-queue-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const log=path.join(root,"queue.json"),queue=path.join(root,"queue-fixture"),session=randomUUID();
+  fs.writeFileSync(queue,`#!${process.execPath}\nimport fs from 'node:fs';\nfs.writeFileSync(process.env.PEERLETTER_TEST_QUEUE_LOG,JSON.stringify(process.argv.slice(2)));\n`,{mode:0o700});
+  const store=new Store(resolveProject(project,state));
+  const receiver=await client(undefined,"codex",project,state,["--wake","codex-queue","--session",session],undefined,true,
+    {PEERLETTER_CODEX_BIN:queue,PEERLETTER_TEST_QUEUE_LOG:log});
+  t.after(async()=>{await receiver.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
+  await receiver.sdk.listTools();
+  const actor=store.agentForSession(session,"codex")!;assert.ok(actor);
+  const sender=store.register({name:"sender",kind:"claude",session_id:randomUUID()});
+  const mail=store.send(sender,{to:actor.name,text:"SECRET-QUEUE-BODY",idempotency_key:"queue-startup"}).message;
+  await eventually(()=>fs.existsSync(log),"Startup must invoke the queue adapter without receiver tool calls");
+  const args=JSON.parse(fs.readFileSync(log,"utf8"));assert.deepEqual(args.slice(0,4),["queue","--thread",session,"--message"]);
+  assert.match(args[4],/peerletter_receive/);assert.ok(!args[4].includes("SECRET-QUEUE-BODY"));
+  await eventually(()=>store.status(sender,mail.id).state==="notified","Queue wake must be recorded");
+  assert.equal(store.peek(actor).messages.length,1);
+  const who=(await receiver.call("whoami",{},{threadId:session})).value;
+  assert.equal(who.registration.mode,"startup");assert.equal(who.session_binding.source,"mcp-metadata");
+  assert.equal((await receiver.call("whoami",{},{threadId:randomUUID()})).value.error.code,"SESSION_MISMATCH");
+});
+
+test("overwritten shared-PID Codex hooks and inherited IDs cannot register an unused wake connection",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-ambiguous-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state)),first=randomUUID(),last=randomUUID();
+  store.bindSession("codex",process.pid,first);store.bindSession("codex",process.pid,last);
+  assert.equal(store.all("SELECT * FROM sessions WHERE kind='codex'").length,1,"A one-row mapping can conceal several threads");
+  const receiver=await client(undefined,"codex",project,state,["--wake","codex-queue"],undefined,true,{CODEX_THREAD_ID:last});
+  t.after(async()=>{await receiver.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
+  await receiver.sdk.listTools();assert.equal(store.peers().length,0);
+  const who=(await receiver.call("whoami",{},{threadId:first})).value;
+  assert.equal(who.session_id,first);assert.equal(who.registration.mode,"tool-call");assert.equal(who.session_binding.source,"mcp-metadata");
+  assert.notEqual(who.session_id,last);
+});
+
+test("wake without a usable startup identity stays lazy for every client",{timeout:15000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-deferred-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state)),connections:Awaited<ReturnType<typeof client>>[]=[];
+  t.after(async()=>{await Promise.all(connections.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
+  for(const [kind,wake] of [["claude","claude-channel"],["codex","codex-queue"],["pi","pi-extension"]]) {
+    for(const session of [undefined,"runtime:unknown","x".repeat(257)]) {
+      const receiver=await client(undefined,kind,project,state,["--wake",wake,...(session?["--session",session]:[])],undefined,true);connections.push(receiver);
+      await receiver.sdk.listTools();assert.equal(store.peers().length,0);
+    }
+  }
+});
+
+test("startup identity preserves names, separate inboxes, persisted pauses and shutdown ownership",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-resume-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state)),session=randomUUID(),connections:Awaited<ReturnType<typeof client>>[]=[];
+  t.after(async()=>{await Promise.all(connections.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
+  const open=async(id:string)=>{const c=await client(undefined,"claude",project,state,["--wake","claude-channel","--session",id],undefined,true);connections.push(c);await c.sdk.listTools();return c;};
+  const first=await open(session),actor=store.agentForSession(session,"claude")!;assert.ok(actor);
+  const sender=store.register({name:"sender",kind:"pi",session_id:randomUUID()});store.pause(session,"manual");
+  const mail=store.send(sender,{to:actor.name,text:"private original inbox",idempotency_key:"original-startup"}).message;
+  store.leaseClaim(actor,["source/**"]);await first.sdk.close();
+  assert.equal(store.agent(actor.name)?.online,0);assert.equal(store.leaseList().length,0);
+  const different=randomUUID();await open(different);
+  const other=store.agentForSession(different,"claude")!;assert.notEqual(other.name,actor.name);assert.equal(store.peek(other).messages.length,0);
+  await open(session);const resumed=store.agentForSession(session,"claude")!;
+  assert.equal(resumed.name,actor.name);assert.equal(store.gate(session).pause_reason,"manual");assert.equal(store.peek(resumed).messages[0].id,mail.id);
+  store.closeAgent(actor);assert.equal(store.agent(resumed.name)?.online,1,"A stale owner cannot close the startup replacement");
+});
+
+test("startup name/session collisions keep original errors and retry when the owner disconnects",{timeout:15000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-conflict-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state)),connections:Awaited<ReturnType<typeof client>>[]=[];
+  t.after(async()=>{await Promise.all(connections.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
+  for(const name of ["role",undefined]) {
+    const session=randomUUID(),extra=["--wake","claude-channel","--session",session];
+    const owner=await client(name,"claude",project,state,extra,undefined,true);connections.push(owner);await owner.sdk.listTools();
+    const original=store.agentForSession(session,"claude")!;assert.ok(original);
+    const duplicate=await client(name,"claude",project,state,extra,undefined,true);connections.push(duplicate);await duplicate.sdk.listTools();
+    const failure=await duplicate.call("whoami");assert.equal(failure.value.error.code,name?"NAME_IN_USE":"SESSION_IN_USE");
+    assert.equal(store.agent(original.name)?.runtime_id,original.runtime_id);
+    await owner.sdk.close();
+    await eventually(()=>store.agent(original.name)?.online===1 && store.agent(original.name)?.runtime_id!==original.runtime_id,"Eligible startup retries without taking ownership from a live runtime");
+    const joined=(await duplicate.call("whoami")).value;assert.equal(joined.name,original.name);assert.equal(joined.registration.mode,"startup");
+    await duplicate.sdk.close();
+  }
+});
+
+test("wake=none leaves known host sessions unregistered until tools/call",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-manual-known-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state)),connections:Awaited<ReturnType<typeof client>>[]=[];
+  t.after(async()=>{await Promise.all(connections.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
+  for(const kind of ["claude","codex","pi"]) {
+    const session=randomUUID(),c=await client(undefined,kind,project,state,["--session",session,"--wake","none"],undefined,true);connections.push(c);
+    await c.sdk.listTools();assert.equal(store.agentForSession(session,kind),undefined);
+    const identity=(await c.call("whoami")).value;assert.equal(identity.registration.mode,"tool-call");assert.equal(identity.session_id,session);
+  }
+});
+
+test("a new startup role owner skips old backlog but leaves it available to receive",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-backlog-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const store=new Store(resolveProject(project,state));store.cliActor("role");
+  const sender=store.register({name:"sender",kind:"pi",session_id:randomUUID()});
+  const old=store.send(sender,{to:"role",text:"OLD-BODY",idempotency_key:"old-backlog"}).message;
+  const receiver=await client("role","claude",project,state,["--session",randomUUID(),"--wake","claude-channel"],undefined,true);
+  t.after(async()=>{await receiver.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
+  const notices:string[]=[];
+  receiver.sdk.setNotificationHandler(z.object({method:z.literal("notifications/claude/channel"),params:z.object({content:z.string()})}),n=>{notices.push(n.params.content);});
+  await receiver.sdk.listTools();await new Promise(resolve=>setTimeout(resolve,850));assert.equal(notices.length,0);
+  assert.equal(store.status(sender,old.id).state,"accepted");
+  const fresh=store.send(sender,{to:"role",text:"NEW-BODY",idempotency_key:"fresh-startup"}).message;
+  await eventually(()=>notices.length===1,"Fresh mail must wake the new startup owner");
+  assert.match(notices[0],/1 new message/);assert.ok(!notices[0].includes("NEW-BODY"));
+  await eventually(()=>store.status(sender,fresh.id).state==="notified","The notification receipt is written after sending the signal");
+  assert.equal(store.status(sender,fresh.id).state,"notified");
+  const mail=(await receiver.call("receive")).value;assert.deepEqual(mail.messages.map((m:any)=>m.id),[old.id,fresh.id]);
+});
 
 test("initialize and tools/list never register unused clients or reserve fixed names",{timeout:20000},async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-lazy-"));const project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
@@ -202,6 +361,7 @@ test("Claude channel notification is body-free and pause blocks high priority",{
   store.pause(session,null);
   for(let i=0;i<30&&!notices.length;i++)await new Promise(resolve=>setTimeout(resolve,100));
   assert.equal(notices.length,1);assert.ok(!notices[0].includes("DO-NOT-INJECT-THIS"));
+  await eventually(()=>store.status(store.agent("codex")!,sent.message.id).state==="notified","Wait for the notification receipt after the channel frame arrives");
   assert.equal((await sender.call("status",{message_id:sent.message.id})).value.state,"notified");
   assert.equal((await claude.call("receive")).value.messages.length,1);
 });
