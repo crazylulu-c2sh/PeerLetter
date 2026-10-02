@@ -4,6 +4,7 @@ import { resolveProject } from "./project.ts";
 import { Store, hasHostSession } from "./store.ts";
 import type { Agent } from "./store.ts";
 import { MailError, validSession, validUuid } from "./errors.ts";
+import { claudeWakes, externalClaudeWake } from "./claude.ts";
 
 export interface RuntimeOptions {
   project?: string; name?: string; kind?: string; session?: string; wake?: string;
@@ -19,7 +20,7 @@ export function startupRegistration(clientName: string, options: RuntimeOptions 
   const wake = options.wake || env.PEERLETTER_WAKE || "none";
   if (wake === "none") return { reason: "Wake is disabled; join on the first tool call." };
   const expected: Record<string,string> = { claude:"claude-channel", codex:"codex-queue", pi:"pi-extension" };
-  if (expected[kind] !== wake) return { reason: "Wake adapter does not match the client kind; join on the first tool call." };
+  if (!(kind === "claude" ? claudeWakes.includes(wake as typeof claudeWakes[number]) : expected[kind] === wake)) return { reason: "Wake adapter does not match the client kind; join on the first tool call." };
 
   // An explicit --session pins this MCP connection. Inherited Codex environment
   // variables and hook records cannot prove which shared-daemon thread loaded it.
@@ -34,6 +35,7 @@ export function startupRegistration(clientName: string, options: RuntimeOptions 
     validSession(session);
     if (!hasHostSession(kind,session,source)) throw new Error("Unbound identity");
     if (kind === "codex") validUuid(session,"INVALID_THREAD_ID");
+    if (externalClaudeWake(wake)) validUuid(session,"INVALID_SESSION_ID");
   } catch { return { reason: "Startup host session is invalid or unbound; join on the first tool call." }; }
   return { binding: {session_id:session,source}, reason: "Wake is enabled and this connection has a verified host session." };
 }
@@ -67,12 +69,14 @@ export class Runtime {
     const session = native || startup?.session_id || configured || environment || hooked || recovery || `runtime:${randomUUID()}`;
     this.sessionSource = native ? "mcp-metadata" : startup ? startup.source : configured ? "configured" : environment ? "environment" : hooked ? "hook" : recovery ? "self-binding" : "unbound";
     const wake = options.wake || process.env.PEERLETTER_WAKE || "none";
-    if (!["none", "claude-channel", "codex-queue", "pi-extension"].includes(wake)) {
-      this.store.close(); throw new MailError("INVALID_WAKE", "Use none, claude-channel, codex-queue or pi-extension.");
+    if (![...claudeWakes, "codex-queue", "pi-extension"].includes(wake)
+      || (wake.startsWith("claude-") && kind !== "claude")) {
+      this.store.close(); throw new MailError("INVALID_WAKE", "Use none, claude-monitor, claude-async-rewake, claude-channel, codex-queue or pi-extension for the matching client.");
     }
     try {
       this.actor = this.store.register({ name: options.name || process.env.PEERLETTER_NAME,
         kind, session_id: session, host_pid: host?.pid, wake, session_source:this.sessionSource });
+      if (externalClaudeWake(wake)) this.store.setWake(this.actor,wake,"Waiting for the Claude watch process.");
       // Only host hooks/adapters write PID mappings: a Codex daemon can parent several threads.
     } catch (error) { this.store.close(); throw error; }
   }
@@ -147,6 +151,7 @@ export class Runtime {
           : this.actor.kind === "pi" && !bound ? { reason:"Manual MCP has no Pi session identity and cannot observe /new.",
             next:"Use the session-bound Pi extension for actual session IDs and /new transitions; call whoami after reloading." } : {}) },
       registration: { mode:this.registrationMode },
+      ...(externalClaudeWake(this.actor.wake) ? { wake_runner:this.store.watchStatus(this.actor.session_id) } : {}),
       protocol: "stdio", delivery: "at-least-once", ack_means: "processed; completion requires a reply" };
   }
 

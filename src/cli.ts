@@ -4,12 +4,15 @@ import { resolveProject } from "./project.ts";
 import { Store } from "./store.ts";
 import { Runtime } from "./runtime.ts";
 import { MailError, errorResult } from "./errors.ts";
+import { watchMail } from "./watch.ts";
 
 const help = `PeerLetter — local agent mail, JSON output
   node src/cli.ts [--project DIR] [--name AGENT] COMMAND [options]
 
   register                         Create an offline named mailbox
   serve                            Keep a named participant online until stopped
+  watch [--session UUID] [--name NAME] [--once] [--timeout-ms MS]
+                                   Body-free Claude monitor; no ACK or registration
   whoami | peers                   Inspect identity or registered participants
   send --to NAME --text TEXT --idempotency-key KEY
        [--text-file FILE|-] [--reply-to UUID] [--to-session ID] [--importance high]
@@ -32,7 +35,18 @@ try {
   const { values: v, positionals: p, runtime: options } = parseOptions(undefined,true);
   const command = p.shift();
   if (v.help || !command) { console.log(help); process.exit(0); }
-  if (command === "serve") {
+  if (command === "watch") {
+    if (options.kind && options.kind !== "claude") throw new MailError("UNSUPPORTED_CLIENT","watch attaches to a Claude MCP session.");
+    const sink=options.wake || "claude-monitor";
+    if (sink !== "claude-monitor" && sink !== "claude-async-rewake") throw new MailError("INVALID_WAKE","watch uses claude-monitor or claude-async-rewake.");
+    const stopped=new AbortController();
+    const close=()=>stopped.abort();
+    process.on("SIGINT",close);process.on("SIGTERM",close);
+    try { await watchMail({...options,backlog:options.wakeBacklog,once:!!v.once,
+      sink,
+      timeoutMs:v["timeout-ms"] === undefined ? 0 : Number(v["timeout-ms"]),signal:stopped.signal}); }
+    finally { process.off("SIGINT",close);process.off("SIGTERM",close); }
+  } else if (command === "serve") {
     if ((options.wake || "none") !== "none") throw new MailError("INVALID_WAKE", "CLI serve uses manual receive; use stdio MCP or the Pi extension for automatic wake.");
     runtime = new Runtime(options.kind || "cli", { ...options, kind: options.kind || "cli" });
     console.log(JSON.stringify({ event: "registered", ...runtime.whoami() }));

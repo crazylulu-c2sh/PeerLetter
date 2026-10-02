@@ -105,6 +105,10 @@ export class Store {
             id TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES agents(name), owner_session TEXT NOT NULL,
             globs TEXT NOT NULL, exclusive INTEGER NOT NULL CHECK(exclusive IN (0,1)), expires_at INTEGER NOT NULL
           );
+          CREATE TABLE IF NOT EXISTS watch_owners (
+            session_id TEXT PRIMARY KEY, token TEXT NOT NULL, sink TEXT NOT NULL,
+            pid INTEGER NOT NULL, proc_start TEXT, started_at INTEGER NOT NULL
+          );
           INSERT OR IGNORE INTO agent_bindings SELECT name,'legacy','legacy' FROM agents;
           PRAGMA user_version=2;
         `);
@@ -292,6 +296,30 @@ export class Store {
   setWake(actor: Actor, mode: string, error: string | null = null): void {
     this.assertActor(actor);
     this.run("UPDATE agents SET wake=?,wake_error=? WHERE name=?", mode, error?.slice(0,500) ?? null, actor.name);
+  }
+
+  // Serialize ownership without stale filesystem-lock races. Never steal a live watcher.
+  claimWatch(session: string, sink: string, token: string): boolean {
+    validSession(session);
+    return this.transaction(() => {
+      const owner = this.get<{token:string;pid:number;proc_start:string|null}>("SELECT * FROM watch_owners WHERE session_id=?",session);
+      if (owner && owner.token !== token && isProcessAlive(owner.pid,owner.proc_start)) return false;
+      this.run("INSERT OR REPLACE INTO watch_owners VALUES(?,?,?,?,?,?)",session,token,sink,process.pid,processInfo(process.pid)?.start ?? null,Date.now());
+      return true;
+    });
+  }
+
+  ownsWatch(session: string, token: string): boolean {
+    return this.get<{token:string}>("SELECT token FROM watch_owners WHERE session_id=?",session)?.token === token;
+  }
+
+  releaseWatch(session: string, token: string): void {
+    this.run("DELETE FROM watch_owners WHERE session_id=? AND token=?",session,token);
+  }
+
+  watchStatus(session: string) {
+    const owner = this.get<{sink:string;pid:number;proc_start:string|null;started_at:number}>("SELECT * FROM watch_owners WHERE session_id=?",session);
+    return { online:!!owner && isProcessAlive(owner.pid,owner.proc_start), sink:owner?.sink ?? null, started_at:owner?.started_at ?? null };
   }
 
   gate(session: string): { pause_reason: string | null; blocked_reasons: string[]; state: string } {

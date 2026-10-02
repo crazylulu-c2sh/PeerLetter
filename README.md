@@ -65,7 +65,7 @@ Changed files receive private `.backup-<timestamp>-<id>` copies. Run again to up
 
 Host trust rules still apply: approve the Claude project MCP server, use Pi `/trust` to save trust for this project and then `/reload`, and review Codex hooks using `/hooks`. Codex skips new or modified hooks until reviewed. Its project configuration also requires a trusted project. Pi `-a` trusts only that invocation; it does not make a running session trust project MCP configuration. The installer does not change host trust decisions. See the [official Codex hooks documentation](https://learn.chatgpt.com/docs/hooks), [Claude hooks reference](https://code.claude.com/docs/en/hooks), and [Pi project trust documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md#project-trust).
 
-By default all three use manual inbox checks. After connecting, call `peerletter_whoami` and `peerletter_peers` to verify the project and name before sending. Claude's PostToolUse hook can signal new mail during ongoing work; Stop signals at the end of a turn. Each signal is body-free, is deduplicated across adapters, and never ACKs.
+By default all three use manual inbox checks. After connecting, call `peerletter_whoami` and `peerletter_peers` to verify the project and name before sending. In Claude's manual mode, PostToolUse can signal new mail during work and Stop signals at the end of a turn. Automatic Claude modes use one notification adapter and suppress those foreground mail notices. Signals are body-free and never ACK.
 
 ### Participation and mailbox names
 
@@ -75,7 +75,7 @@ With an opt-in wake adapter, a connection whose actual host session is known joi
 
 | Client | Identity accepted for startup registration |
 |---|---|
-| Claude channel | `CLAUDE_CODE_SESSION_ID`, or an explicitly configured session |
+| Claude monitor / async-rewake / channel | `CLAUDE_CODE_SESSION_ID`, or an explicitly configured session (watch modes require a UUID) |
 | Pi extension | The actual session ID the extension supplies with `--session`; Pi connects extension MCP servers at startup |
 | Codex queue | An explicit `--session <thread UUID>` that deliberately pins this MCP connection |
 
@@ -128,6 +128,60 @@ Run these from the project directory. Codex's command registers a user-scope ser
 
 All signals contain a count and a request to check the inbox, **never the mail body**. Notifications never ACK. Successful notifications are tracked per message, session and sink. Failures remain retryable and appear in `whoami` / `peers`; basic receive continues to work.
 
+### Claude monitor (recommended)
+
+```bash
+node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
+  --client claude --wake monitor --apply
+```
+
+The installer generates a private local Claude plugin containing the MCP server, skill, lifecycle hooks and `experimental.monitors` entry. It registers a local directory catalog and installs the plugin with **local scope**: enabled for this user in this project. Nothing is uploaded or published. The plugin uses this checkout's installed dependencies and absolute Node path; continue to manage dependencies with pnpm. Claude Code **2.1.283+** is required by the installer. See the [manifest reference](https://code.claude.com/docs/en/plugins-reference#monitors) and [local plugin installation](https://code.claude.com/docs/en/discover-plugins).
+
+Restart Claude normally, or use `/reload-plugins` in an existing session. **No channel launch flag is needed.** Accept the host's normal workspace/plugin trust prompts. The installer does not approve them for you. The generated monitor arms at session start and plugin reload. Monitors require an interactive session with the Monitor tool; they do not arm in `claude -p` and are unavailable on some cloud providers, including Bedrock, Google Cloud Agent Platform and Foundry.
+
+The installer removes this checkout's competing project `.mcp.json` entry, its server approval-list entries, hook handlers and skill link, preserving unrelated settings and backing up changed files. Claude's plugin CLI also updates user settings (`extraKnownMarketplaces`) and plugin registries; apply snapshots their existing files and prints `plugin_state_backups`, including whether each file existed. Close/reload the old connection before the plugin MCP takes ownership. Remove any separate user-scope PeerLetter MCP registration yourself before switching; a second live MCP cannot take an existing session. Plugin MCP tool names may carry Claude's plugin namespace. Use the tools actually exposed by the host.
+
+The plugin runs the equivalent of:
+
+```bash
+node /path/to/PeerLetter/src/cli.ts --project /path/to/project watch
+# An explicitly managed watcher can instead use its own exact session/name:
+node /path/to/PeerLetter/src/cli.ts --project /path/to/project \
+  --session <CLAUDE_SESSION_UUID> --name <EXACT_NAME> watch
+```
+
+`watch` requires the current `CLAUDE_CODE_SESSION_ID` or an explicit UUID. The installed 2.1.287 monitor uses the shell executor that exports its current session ID; no recent-session search or role-name guess is used. A missing/invalid ID fails without creating a participant. Watch waits if its own MCP has not joined, follows only that session through MCP reconnects, and never registers a CLI mailbox, closes MCP presence, releases MCP leases, reads mail as delivered or ACKs. A mismatching name is rejected. The normal wake baseline skips earlier mail; `--wake-backlog` intentionally includes it.
+
+Each successful signal prints one short count/receive instruction to stdout and records a `claude-monitor` notice. Diagnostics go to stderr. SQLite ensures one live watch process per project/session, rejects competing watches and recovers ownership after a crash. Failed output is retryable; a crash between external output and recording can repeat a signal. There is no exactly-once guarantee. `SIGINT`/`SIGTERM`, the session-end gate or selecting another mode releases watch ownership without disconnecting MCP. `--timeout-ms MS` sets an optional limit; the monitor defaults to continuous watching.
+
+Inspect `whoami.wake_runner.online` and `wake_error` after reload. MCP startup registration alone does not prove the monitor is running or the TUI will react. Switching mode writes `.claude/peerletter.json`, which an old monitor reads to stop promptly even before reload. Claude plugin disable alone does **not** terminate an already armed monitor; use the installer to select `none`, or stop its task. See [monitor lifecycle](https://code.claude.com/docs/en/plugins/components#monitors).
+
+### Claude async-rewake (time-limited alternative)
+
+```bash
+node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
+  --client claude --wake async-rewake --apply
+```
+
+This local plugin uses a background Stop hook with `asyncRewake: true`. After each completed turn it waits for new mail using the same watch core. On a real notice it writes the body-free instruction to stderr, records the notice without ACK, and exits **2**, allowing Claude to start an idle turn. A timeout, malformed input or technical failure never exits 2. A duplicate waiting hook exits normally instead of starting a second watcher.
+
+The host timeout is **600 seconds**; the waiter ends after **595 seconds** to leave time for cleanup. After expiry there is a **gap until the next Stop event**. It also has no waiter before the first turn completes. Extending the timeout is not equivalent to continuous monitoring. This is why monitor is recommended for session-long wake. The host's timeout and exit-2 behavior are documented in the [hooks reference](https://code.claude.com/docs/en/hooks). `wake_runner.online` is false during that gap; explicit receive remains available.
+
+### Claude gates and changing mode
+
+All Claude adapters obey persisted manual pause and the reported UI/compaction/session-end gates. PermissionRequest opens a gate for its exact tool call; PostToolUse/PostToolUseFailure close that call's gate. Elicitation/ElicitationResult and PreCompact/PostCompact report their corresponding gates. SessionEnd stops watching, StopFailure pauses after provider errors, and an explicit UserPromptSubmit resumes manual pause. When supplied, PostToolUseFailure `is_interrupt:true` also pauses.
+
+Claude does not provide a reliable hook for every Escape/cancel or every UI dialog. Cancelling a running tool does not necessarily fire PostToolUseFailure. The adapter cannot infer an unreported host pause: use `peerletter --name <EXACT_NAME> pause` to persist a pause that all adapters respect, and `resume` or explicit new user input to clear it. Gates depend on the lifecycle hooks being loaded/trusted. No gate is inferred from idle time, mail priority or error text.
+
+Choose exactly one Claude mode with `--client claude --wake monitor|async-rewake|channel|none` (the full `claude-*` values also work). For example:
+
+```bash
+node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
+  --client claude --wake none --apply
+```
+
+Selecting none/channel disables this project's generated plugin entry and restores the file MCP/skill/hook setup. Reload the host connections after switching. Existing inboxes, ACKs and pauses are preserved. Restore the printed setting backups to undo file changes; the catalog remains local and can be removed separately using Claude's plugin commands.
+
 ### Claude channel
 
 ```bash
@@ -137,7 +191,7 @@ cd /path/to/project
 claude --dangerously-load-development-channels server:peerletter
 ```
 
-This opts into the experimental `claude/channel` capability and `notifications/claude/channel`. The development flag is required for this local server; it is not a published marketplace plugin. Check account and version availability in the [official channels documentation](https://code.claude.com/docs/en/channels-reference). Stop hooks provide a body-free fallback while a turn is already ending; they cannot start an idle session on their own.
+This opts into the experimental `claude/channel` capability and `notifications/claude/channel`. The development flag is required for this local server; it is not a published marketplace plugin. Check account and version availability in the [official channels documentation](https://code.claude.com/docs/en/channels-reference). Foreground mail notices are suppressed in this mode to avoid racing the channel. Switch to none for manual Stop/PostToolUse notices.
 
 When the restarted MCP inherits `CLAUDE_CODE_SESSION_ID`, it registers and watches without an initial whoami call. If the actual session cannot be identified at initialization, call whoami once to join. A saved `--wake` flag alone does not bypass channel enablement in the Claude host.
 
@@ -194,6 +248,7 @@ Names are unique among online participants. Explicit collisions fail with `NAME_
 - Directories are 0700 and database/WAL/SHM files are 0600. The local OS account is the trust boundary. CLI is allowed to act as any local named mailbox; it is not cross-user authentication.
 - SQLite uses WAL, 5000 ms busy timeout, foreign keys and `synchronous=FULL`. Long polls hold no write transaction. Use local storage; WAL is unsuitable for a network filesystem.
 - Schema 2 adds naming and session-source metadata in a separate table. Existing schema 1 mailboxes, messages, delivery states and leases are preserved in an atomic migration. Legacy names can be recovered by the same bound session and stay reserved for other automatic sessions. Older checkouts cannot open a migrated database; update all clients to this checkout and reconnect.
+- An additive `watch_owners` table coordinates Claude watch processes. It does not replace agent/session identity, expire inboxes or change delivery/ACK records.
 - Retention is manual: `prune --days 30` previews removal of whole threads whose messages are all ACKed and whose ACKs are older than 30 days. `--apply` removes them. There is no automatic deletion.
 - `doctor` checks permissions and SQLite integrity. `doctor --checkpoint` requests a TRUNCATE checkpoint; run during low activity and inspect its busy result.
 
@@ -207,6 +262,10 @@ Read the shared [collaboration skill](skills/peerletter/SKILL.md) for inbox timi
 
 The suite checks concurrent writes, deduplication, reply direction, priority cursors, atomic ACK ownership, cancellation, leases, durable restart, SIGKILL presence, permissions, notification gates and Claude channel framing. It also covers manual lazy registration for all clients, conditional startup registration, Claude/Pi wake before any receiver tool call, the Codex queue adapter with a local recording executable, ambiguous shared-PID hook mappings, first-call Codex identity, same-session name recovery, mail isolation, schema 1 migration, live-owner protection, Pi `/new`/resume using real stdio MCP clients, explicit recovery, registration retry and Claude mid-turn hooks. Tests never send mail to running agents. Recording a queue command proves adapter invocation, not that an actual idle Codex TUI wakes.
 
+Watch fixtures cover a real SDK MCP starting after watch, no-tool startup, same-session reconnect, exact-name checks, actor/lease preservation, one live watcher, dead-owner recovery, old backlog, pause/UI/compact, output failure, mode changes, foreground-adapter exclusion and async-rewake exit status without ACK. These fixtures verify the adapters, not the host's actual interactive UI behavior. Validate generated plugin and catalog manifests with `claude plugin validate --strict`, then check idle wake in the actual interactive client without channel flags.
+
 `pnpm run test:native-codex` runs a regression for an installed Codex executable. It runs real `codex exec` against a loopback mock Responses provider in an isolated configuration, strips `CODEX_THREAD_ID` from the MCP environment, and verifies native metadata binds the same thread ID that Codex emits. GitHub Actions runs it with Codex 0.159.3 temporarily installed using pnpm. No external model or production mailbox is used. This installed-client test is separate from the default SDK suite and does not prove that an idle TUI wakes. Try opt-in wake adapters in their actual interactive clients after completing host setup.
+
+`pnpm run test:native-claude` requires installed Claude Code, Python 3 and a Unix PTY. It installs **async-rewake** into a temporary project with isolated Claude settings and PeerLetter state, accepts the normal UI prompts only for that generated fixture, and points a dummy API key at a loopback mock Anthropic provider. It verifies that mail alone starts a subsequent interactive model turn containing a body-free notice, without channel flags or external model calls. The fixture never ACKs and never changes real host settings or production inboxes. Onboarding UI automation is version dependent; tested with Claude Code 2.1.287. That client's loopback/API-key configuration does not expose Monitor, so the native monitor path must be checked in an interactive account/provider that supports it. This optional installed-client test is separate from the default CI SDK suite.
 
 Update the checkout with `git pull --ff-only` and `pnpm install --frozen-lockfile`, then restart/reload its clients. No version bump, registry upload or marketplace publication is needed.

@@ -74,7 +74,7 @@ MCP 연결 후 peerletter_whoami로 이름과 상태를 확인하세요. wake=no
 ${quoteShell(process.execPath)} ${quoteShell(path.join(checkout,"scripts/install.ts"))} --project ${quoteShell(project)} --client pi --pi-mode extension --apply
 \`\`\`
 
-확장의 MCP가 초기화되면 도구 호출 없이 참여하며 알림을 받을 수 있습니다. whoami로 이름과 wake 상태를 확인하세요. /new는 새 자동 이름을 받고, 같은 세션 resume은 기존 이름을 유지합니다. Claude는 claude-channel 설정과 채널 허용 플래그도 필요합니다. 기존 연결은 변경된 코드를 적용하도록 재시작/재연결해야 합니다.
+확장의 MCP가 초기화되면 도구 호출 없이 참여하며 알림을 받을 수 있습니다. whoami로 이름과 wake 상태를 확인하세요. /new는 새 자동 이름을 받고, 같은 세션 resume은 기존 이름을 유지합니다. Claude는 --client claude --wake monitor --apply로 로컬 플러그인을 설치하고 /reload-plugins 또는 일반 재시작으로 플래그 없이 감시할 수 있습니다. whoami.wake_runner.online을 확인하세요. async-rewake는 Stop 뒤 595초 감시(호스트 제한 600초) 후 다음 Stop까지 공백이 생기는 대안입니다. channel 선택 때만 채널 허용 실행 플래그가 필요합니다. none 전환은 실행 중인 watch를 중지하며 기존 연결은 재로드하세요. 기존 연결은 변경된 코드를 적용하도록 재시작/재연결해야 합니다.
 
 자세한 설정과 자동 깨우기: [저장소 README](${path.join(checkout,"README.md")})
 `);
