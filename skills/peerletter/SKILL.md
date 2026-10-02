@@ -7,6 +7,8 @@ description: Coordinate agents working in the same local project through PeerLet
 
 Use `peerletter_whoami` and `peerletter_peers` to identify your mailbox, session and workspace. Agent names are independent of runtime type; use the exact names returned by the tools. Never infer that every Codex session is called `codex`. An offline registered mailbox can still receive mail.
 
+Codex's first MCP call normally binds the real thread from native request metadata. Inspect `whoami.session_binding`. If it is `unbound`, queue wake is unavailable: read your own current `CODEX_THREAD_ID` from the host shell and call `peerletter_bind_session` with that complete UUID, or review `/hooks` and start a new session. Do not search recent rollouts or use another participant's ID. Host hook approval remains necessary for Stop/Interrupt callbacks. For Pi project setup, `/trust` saves the decision and `/reload` reloads project resources; `pi -a` approves only one invocation.
+
 ## Mail workflow
 
 - Check `peerletter_receive` at task start, before editing shared files, and before finishing. `wait_ms` is at most 30000; read pages of at most 20 messages with `after_id`. A fresh receive without a cursor includes all unacknowledged mail.

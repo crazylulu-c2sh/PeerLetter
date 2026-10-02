@@ -18,7 +18,7 @@ export function mergeHooks(config: Record<string,any>, kind: string, node: strin
   const copy = structuredClone(config);
   copy.hooks ||= {};
   const events = kind === "codex" ? ["SessionStart","Stop","UserPromptSubmit","Interrupt"]
-    : ["SessionStart","Stop","UserPromptSubmit","StopFailure"];
+    : ["SessionStart","Stop","PostToolUse","UserPromptSubmit","StopFailure"];
   const command = `${quoteShell(node)} ${quoteShell(path.join(checkout,"hooks/hook.ts"))} ${kind}`;
   for (const event of events) {
     const existing = copy.hooks[event] || [];
@@ -138,7 +138,7 @@ if(process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.met
         if(!fs.existsSync(link.file))fs.symlinkSync(link.target,link.file,"dir");
       }
       console.log(json({project,applied:true,files:backups,skills:plan.links.map(l=>l.file),
-        next:"Start a new Codex/Claude session; Pi /reload. Review Codex hooks with /hooks and approve project MCP in the host UI."}));
+        next:"Codex: review /hooks, start a new session, then call peerletter_whoami to bind native thread metadata. Claude: approve project MCP and start a new session. Pi: /trust this project, then /reload (pi -a is one-run trust only)."}));
     }
   } catch(error) {console.error(json(errorResult(error)));process.exitCode=1;}
 }

@@ -20,3 +20,5 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm run check
       - run: pnpm test
+      - name: Verify native Codex thread binding with a local fixture
+        run: pnpm --package=@openai/codex@0.159.3 dlx -c 'node scripts/native-codex-test.ts'

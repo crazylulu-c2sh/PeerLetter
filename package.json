@@ -8,6 +8,7 @@
   "engines": { "node": ">=24.18.0" },
   "scripts": {
     "test": "node --test test/*.test.ts",
+    "test:native-codex": "node scripts/native-codex-test.ts",
     "check": "tsc --noEmit",
     "stdio": "node src/stdio.ts",
     "cli": "node src/cli.ts",

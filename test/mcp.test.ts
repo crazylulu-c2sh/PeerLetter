@@ -12,20 +12,21 @@ import { Store } from "../src/store.ts";
 import { resolveProject } from "../src/project.ts";
 
 const script = fileURLToPath(new URL("../src/stdio.ts",import.meta.url));
-async function client(name: string, kind: string, project: string, state: string, extra: string[] = []) {
+async function client(name: string, kind: string, project: string, state: string, extra: string[] = [], expectedReadyError?: string) {
   const transport = new StdioClientTransport({ command: process.execPath,
     args: [script,"--project",project,"--name",name,"--state",state,...extra], stderr: "pipe" });
   const sdk = new Client({ name: kind, version: "test" });
   let errors = ""; transport.stderr?.on("data",chunk=>{errors+=String(chunk);});
   await sdk.connect(transport);
-  async function call(tool: string, args: Record<string,unknown> = {}) {
-    const response = await sdk.callTool({ name: `peerletter_${tool}`, arguments: args });
+  async function call(tool: string, args: Record<string,unknown> = {}, meta?: Record<string,unknown>) {
+    const response = await sdk.callTool({ name: `peerletter_${tool}`, arguments: args, ...(meta ? {_meta:meta} : {}) });
     const blocks = response.content as {type:string;text?:string}[];
     const value = JSON.parse(blocks.find(b=>b.type==="text")!.text!);
     return { value, error: !!response.isError };
   }
   const ready = await call("whoami");
-  assert.equal(ready.error,false,JSON.stringify(ready.value));
+  if(expectedReadyError) assert.equal(ready.value.error?.code,expectedReadyError);
+  else assert.equal(ready.error,false,JSON.stringify(ready.value));
   return { sdk,transport,call,errors:()=>errors };
 }
 
@@ -39,7 +40,7 @@ test("three real stdio MCP processes share mail, identity, concurrent writes and
   const who=(await codex.call("whoami")).value;
   assert.equal(who.name,"codex-review");assert.equal(who.kind,"codex");assert.equal(who.project,project);
   assert.equal((await pi.call("peers")).value.peers.filter((p:any)=>p.online).length,3);
-  assert.equal((await codex.sdk.listTools()).tools.length,10);
+  assert.equal((await codex.sdk.listTools()).tools.length,11);
   const pending=claude.call("receive",{wait_ms:3000});
   const send=(await codex.call("send",{to:"claude-build",text:"implementation ready",idempotency_key:"handoff"})).value;
   assert.equal((await pending).value.messages[0].id,send.message.id);
@@ -59,6 +60,53 @@ test("three real stdio MCP processes share mail, identity, concurrent writes and
   await pi.call("ack",{message_ids:[...first.messages,...second.messages].map(m=>m.id)});
   assert.equal((await pi.call("peek")).value.unacknowledged_count,0);
   assert.ok(!codex.errors().includes("SQLITE_BUSY"));
+});
+
+test("Codex request metadata binds the actual thread without environment or trusted hooks",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-binding-"));const project=path.join(root,"project");fs.mkdirSync(project);
+  const state=path.join(root,"state"),thread=randomUUID(),rootSession=randomUUID();
+  const codex=await client("codex","codex",project,state),sender=await client("claude","claude",project,state);
+  const store=new Store(resolveProject(project,state));
+  t.after(async()=>{await codex.sdk.close();await sender.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
+  const fallback=(await codex.call("whoami")).value;
+  assert.equal(fallback.session_binding.state,"unbound");
+  assert.equal(store.all("SELECT * FROM sessions WHERE kind='codex'").length,0,"An unbound runtime must not seed a fake Codex session mapping");
+  store.pause(fallback.session_id,"manual");
+  const lease=store.leaseClaim(store.agent("codex")!,["src/**"]);
+  await sender.call("send",{to:"codex",text:"arrived before binding",idempotency_key:"before-binding"});
+  const bound=(await codex.call("whoami",{},{threadId:thread,sessionId:rootSession})).value;
+  assert.equal(bound.session_id,thread,"Use threadId, not a fork's root sessionId");
+  assert.equal(bound.session_binding.source,"mcp-metadata");assert.equal(bound.session_binding.state,"bound");
+  assert.equal(bound.delivery_gate.pause_reason,"manual");
+  assert.equal(store.leaseList().find(l=>l.id===lease.id)?.owner_session,thread);
+  store.pause(thread,null);
+  assert.equal(store.pendingNotices(store.agent("codex")!,"test",store.noticeBaseline(store.agent("codex")!)).length,1);
+  assert.equal((await codex.call("receive",{},{threadId:thread})).value.messages.length,1);
+  assert.equal((await codex.call("bind_session",{session_id:thread},{threadId:thread})).value.session_binding.source,"mcp-metadata");
+  assert.equal((await codex.call("whoami",{},{threadId:randomUUID()})).value.error.code,"SESSION_MISMATCH");
+});
+
+test("explicit Codex self-binding recovers older clients and rejects changing a bound thread",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-self-bind-"));const project=path.join(root,"project");fs.mkdirSync(project);
+  const codex=await client("codex","codex",project,path.join(root,"state"));
+  t.after(async()=>{await codex.sdk.close();fs.rmSync(root,{recursive:true,force:true});});
+  const thread=randomUUID();
+  const result=await codex.call("bind_session",{session_id:thread});
+  assert.equal(result.error,false);assert.equal(result.value.session_id,thread);assert.equal(result.value.session_binding.source,"self-binding");
+  assert.equal((await codex.call("bind_session",{session_id:thread})).error,false);
+  assert.equal((await codex.call("bind_session",{session_id:randomUUID()})).value.error.code,"SESSION_MISMATCH");
+});
+
+test("duplicate online names report NAME_IN_USE through MCP instead of NOT_READY",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-name-error-"));const project=path.join(root,"project");fs.mkdirSync(project);
+  const state=path.join(root,"state");
+  const owner=await client("same-name","codex",project,state);
+  const duplicate=await client("same-name","codex",project,state,[],"NAME_IN_USE");
+  t.after(async()=>{await owner.sdk.close();await duplicate.sdk.close();fs.rmSync(root,{recursive:true,force:true});});
+  const result=await duplicate.call("receive");
+  assert.equal(result.error,true);assert.equal(result.value.error.code,"NAME_IN_USE");
+  assert.match(result.value.error.message,/different name/);
+  assert.equal((await owner.call("whoami")).value.name,"same-name");
 });
 
 test("Claude channel notification is body-free and pause blocks high priority",{timeout:10000},async t=>{

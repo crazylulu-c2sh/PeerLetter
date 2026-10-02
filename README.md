@@ -63,9 +63,19 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 
 Changed files receive private `.backup-<timestamp>-<id>` copies. Run again to update the managed Codex block or the same checkout's entries. Conflicting skill links and unrelated PeerLetter registrations are rejected. Restore a backup to undo a change, or remove the generated entry and its hook handlers. Skill links point at this checkout. Local configuration contains absolute paths; keep it out of a shared project's commits if those paths are machine specific.
 
-Host trust rules still apply: approve the Claude project MCP server, trust the Pi project, and review Codex hooks using `/hooks`. Codex skips new or modified hooks until reviewed. Its project configuration also requires a trusted project. See the [official Codex hooks documentation](https://learn.chatgpt.com/docs/hooks), [Claude hooks reference](https://code.claude.com/docs/en/hooks), and [Pi MCP documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/mcp.md).
+Host trust rules still apply: approve the Claude project MCP server, use Pi `/trust` to save trust for this project and then `/reload`, and review Codex hooks using `/hooks`. Codex skips new or modified hooks until reviewed. Its project configuration also requires a trusted project. Pi `-a` trusts only that invocation; it does not make a running session trust project MCP configuration. The installer does not change host trust decisions. See the [official Codex hooks documentation](https://learn.chatgpt.com/docs/hooks), [Claude hooks reference](https://code.claude.com/docs/en/hooks), and [Pi project trust documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md#project-trust).
 
-By default all three use manual inbox checks. After connecting, call `peerletter_whoami` and `peerletter_peers` to verify the project and name before sending.
+By default all three use manual inbox checks. After connecting, call `peerletter_whoami` and `peerletter_peers` to verify the project and name before sending. Claude's PostToolUse hook can signal new mail during ongoing work; Stop signals at the end of a turn. Each signal is body-free, is deduplicated across adapters, and never ACKs.
+
+### Codex session binding
+
+On the tested Codex 0.159.3, each MCP tool call carries the current thread in `_meta.threadId`. PeerLetter binds it automatically on the first call, including `peerletter_whoami`; this works when the MCP subprocess has no `CODEX_THREAD_ID` and SessionStart hooks are unreviewed. A fork's `_meta.sessionId` can identify the root session, so it is not used as a queue target. This is a version-specific integration verified against the installed client and the [Codex tool-call source](https://github.com/openai/codex/blob/main/codex-rs/core/src/mcp_tool_call.rs).
+
+Inspect `whoami.session_binding`: `bound` identifies a host session, while `unbound` means only a temporary `runtime:...` mailbox identity is available. Basic send/receive still work, but queue wake needs a real thread ID. Fallback IDs are never written as host session mappings. If a hook runs later, the runtime can adopt its mapping. Binding a temporary identity preserves its pause, advisory leases and wake baseline.
+
+For older clients that omit native thread metadata, read **your own** `CODEX_THREAD_ID` from the agent's shell, then call `peerletter_bind_session({session_id: "<that full UUID>"})`. Alternatively review `/hooks` and start a new session so SessionStart can bind it. Never choose a recent rollout, a peer's ID or a guessed ID. Stop and Interrupt hooks still require host review even when native metadata already bound the thread.
+
+If a configured name is already online, tools return `NAME_IN_USE` with an actionable message. Restart that MCP connection with another name; a failed registration no longer hides the cause behind `NOT_READY`.
 
 For one client only, add `--client codex|claude|pi`. An explicit name uses `--client codex --name codex-review`; otherwise live sessions get `codex`, `codex-2`, etc. Set `PEERLETTER_NAME` when launching a host to name each participant independently; Codex configuration forwards it to the MCP subprocess.
 
@@ -108,7 +118,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
   --client codex --wake codex-queue --apply
 ```
 
-This adapter uses the installed `codex queue --thread UUID --message ...` command. It is **undocumented and version dependent**, and requires the host's existing shared daemon. PeerLetter does not start a daemon. It uses only its own thread ID from `CODEX_THREAD_ID` or the SessionStart hook's PID mapping, and verifies the host process. Without a usable UUID or daemon it reports an error and retries. Stop hooks and explicit receive remain available. Review `/hooks` and start a new session after installing.
+This adapter uses the installed `codex queue --thread UUID --message ...` command. It is **undocumented and version dependent**, and requires the host's existing shared daemon. PeerLetter does not start a daemon. It uses its own thread ID from native tool-call metadata, explicit self-binding, `CODEX_THREAD_ID` or the SessionStart hook's PID mapping, and verifies the host process. Without a usable UUID or daemon it reports an error and retries. Stop hooks and explicit receive remain available. Review `/hooks`, start a new session and call whoami after installing.
 
 The Interrupt hook records a user pause, which blocks queue wake even for high priority mail. New explicit user input or CLI `resume` clears it. This protection depends on that hook running; an unreviewed or disabled Interrupt hook cannot report the host's pause state.
 
@@ -131,7 +141,8 @@ Messages without `to_session` stay in the named inbox across sessions. Session-s
 
 | Tool | Purpose |
 |---|---|
-| `peerletter_whoami`, `peerletter_peers` | Name, session, workspace, presence and wake status |
+| `peerletter_whoami`, `peerletter_peers` | Name, session, workspace, presence and wake status; whoami also reports session binding |
+| `peerletter_bind_session` | Recovery for Codex clients without native metadata; binds only this participant to its own current full thread UUID |
 | `peerletter_send` | `to`, `text`, required `idempotency_key`; optional full UUID `reply_to`, `thread_id`, `to_session`, `importance` |
 | `peerletter_receive`, `peerletter_peek` | At most 20 unacknowledged messages; priority then acceptance order; optional cursor |
 | `peerletter_ack` | Atomic batch acknowledgment by the recipient after processing |
@@ -159,6 +170,8 @@ Read the shared [collaboration skill](skills/peerletter/SKILL.md) for inbox timi
 
 `pnpm run check` checks core, hook, script and Pi extension types. `pnpm test` covers shared SQLite semantics and launches real SDK stdio clients as Codex, Claude and Pi. Tests use temporary state, not live agent mailboxes. The GitHub Actions workflow runs from a clean checkout on Node 24, installs the frozen pnpm lockfile, checks types and runs tests. It has no publishing step.
 
-The suite checks concurrent writes, deduplication, reply direction, priority cursors, atomic ACK ownership, cancellation, leases, durable restart, SIGKILL presence, permissions, notification gates and Claude channel framing. Protocol tests do not prove that an idle host TUI wakes: try the opt-in adapter in the actual client after its own setup. Automated tests do not invoke a model provider or send mail to your running agents.
+The suite checks concurrent writes, deduplication, reply direction, priority cursors, atomic ACK ownership, cancellation, leases, durable restart, SIGKILL presence, permissions, notification gates and Claude channel framing. It also covers Codex metadata binding, explicit recovery, name-collision errors and Claude mid-turn hooks. Tests never send mail to running agents.
+
+`pnpm run test:native-codex` runs a regression for an installed Codex executable. It runs real `codex exec` against a loopback mock Responses provider in an isolated configuration, strips `CODEX_THREAD_ID` from the MCP environment, and verifies native metadata binds the same thread ID that Codex emits. GitHub Actions runs it with Codex 0.159.3 temporarily installed using pnpm. No external model or production mailbox is used. This installed-client test is separate from the default SDK suite and does not prove that an idle TUI wakes. Try opt-in wake adapters in their actual interactive clients after completing host setup.
 
 Update the checkout with `git pull --ff-only` and `pnpm install --frozen-lockfile`, then restart/reload its clients. No version bump, registry upload or marketplace publication is needed.

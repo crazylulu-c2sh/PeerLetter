@@ -223,12 +223,19 @@ export class Store {
       : this.get<Agent>("SELECT * FROM agents WHERE session_id=? AND online=1 ORDER BY last_seen DESC LIMIT 1", session);
   }
 
-  updateSession(actor: Actor, session: string): void {
+  updateSession(actor: Actor, session: string, preserveRuntimeState = false): void {
     this.assertActor(actor);
     validSession(session);
     this.transaction(() => {
       this.run("UPDATE agents SET session_id=? WHERE name=? AND runtime_id=?", session, actor.name, actor.runtime_id || "");
-      this.run("INSERT OR IGNORE INTO wake_baselines VALUES(?,?,?)",actor.name,session,this.maxSequence());
+      this.run("INSERT OR IGNORE INTO wake_baselines VALUES(?,?,?)",actor.name,session,
+        preserveRuntimeState ? this.noticeBaseline(actor) : this.maxSequence());
+      if(preserveRuntimeState) {
+        const previous=this.gate(actor.session_id),current=this.gate(session);
+        this.run("INSERT INTO gates VALUES(?,?,?) ON CONFLICT(session_id) DO UPDATE SET pause_reason=excluded.pause_reason,blocks=excluded.blocks",
+          session,current.pause_reason || previous.pause_reason,JSON.stringify([...new Set([...previous.blocked_reasons,...current.blocked_reasons])]));
+        this.run("UPDATE leases SET owner_session=? WHERE owner=? AND owner_session=?",session,actor.name,actor.session_id);
+      }
     });
     actor.session_id = session;
   }

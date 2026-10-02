@@ -35,6 +35,7 @@ test("project installer preserves other settings, is repeatable and creates priv
   }
   const settings=JSON.parse(fs.readFileSync(path.join(project,".claude/settings.local.json"),"utf8"));
   assert.deepEqual(settings.permissions.allow,["Bash(ls:*)"]);assert.equal(settings.hooks.Stop[0].hooks[0].command,"original");
+  assert.ok(settings.hooks.PostToolUse[0].hooks[0].command.endsWith("claude"));
   const again=installation(project);
   assert.ok(again.writes.every(w=>fs.readFileSync(w.file,"utf8")===w.data));
   assert.throws(()=>mergeToml("[mcp_servers.peerletter]\ncommand='custom'\n",""));
@@ -43,6 +44,20 @@ test("project installer preserves other settings, is repeatable and creates priv
   const mcp=extension.writes.find(w=>w.file.endsWith("mcp.json"))!;
   assert.equal(JSON.parse(mcp.data).mcpServers.peerletter,undefined);
   assert.ok(extension.writes.find(w=>w.file.endsWith("settings.json"))!.data.includes("pi/peerletter.ts"));
+});
+
+test("Claude PostToolUse injects a single body-free notice while work continues",t=>{
+  const {root,project}=temp(t);const state=path.join(root,"state"),session=randomUUID();
+  const store=new Store(resolveProject(project,state));t.after(()=>store.close());
+  const sender=store.register({name:"sender",kind:"codex",session_id:randomUUID()});
+  const receiver=store.register({name:"receiver",kind:"claude",session_id:session});
+  const mail=store.send(sender,{to:"receiver",text:"PRIVATE-BODY",idempotency_key:"mid-turn"}).message;
+  const hook=(event:string)=>execFileSync(process.execPath,[path.join(repo,"hooks/hook.ts"),"claude"],
+    {env:{...process.env,PEERLETTER_STATE_DIR:state},input:JSON.stringify({session_id:session,cwd:project,hook_event_name:event}),encoding:"utf8"});
+  const output=hook("PostToolUse"),notice=JSON.parse(output).hookSpecificOutput;
+  assert.equal(notice.hookEventName,"PostToolUse");assert.match(notice.additionalContext,/peerletter_receive/);assert.ok(!output.includes("PRIVATE-BODY"));
+  assert.equal(hook("PostToolUse"),"");assert.equal(hook("Stop"),"");
+  assert.equal(store.status(sender,mail.id).state,"notified");assert.equal(store.peek(receiver).messages.length,1);
 });
 
 test("prepared wrapper executes even with shell punctuation in project/output paths",t=>{
