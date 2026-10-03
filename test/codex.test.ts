@@ -48,7 +48,7 @@ test("busy N mail read and ACK produces no queued wake; unread mail wakes once a
   f.rpc.status="active";const next=Array.from({length:5},()=>f.mail());await f.watcher.tick();assert.equal(f.rpc.queued.length,0);
   f.rpc.status="idle";await f.watcher.tick();assert.equal(f.rpc.queued.length,1);
   assert.ok(!JSON.stringify(f.rpc.queued).includes("SECRET-MAIL-BODY"));
-  assert.match(f.rpc.queued[0].input[0].text,/If receive returns no messages/);
+  assert.match(f.rpc.queued[0].input[0].text,/If receive returns no messages, continue any task already in progress; end the turn only if there is none/);
   assert.ok(next.every(m=>f.store.status(f.sender,m.id).state === "notified"));
   await f.watcher.tick();assert.equal(f.rpc.queued.length,1);assert.equal(f.store.peek(f.actor).messages.length,5);
 });
