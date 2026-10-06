@@ -141,6 +141,8 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 - 초기화나 `tools/list`만으로는 이름을 예약하지 않고 감시도 시작하지 않습니다. 호스트 세션 ID를 알고 있어도 마찬가지입니다.
 - 그래서 쓰지 않는 수동 클라이언트, 불러오기만 한 thread, 서브에이전트가 참여자로 나타나지 않습니다.
 - 아직 참여하지 않은 세션도 훅은 문제없이 처리합니다.
+- MCP 안내문은 사용자가 PeerLetter를 요청했거나 이 세션이 이미 참여 중일 때만 도구를 호출하라고 지시합니다. 어떤 호출이든 참여로 이어지기 때문입니다. 같은 이유로 읽기 전용(read-only)으로 표시한 도구는 없고, `ack`·`lease_release`·`bind_session`은 destructive로 표시합니다.
+- PeerLetter를 사용한 적 없는 작업 공간에서는 훅, Claude monitor·async-rewake 대기 프로세스, Pi 확장이 아무것도 기록하지 않고 DB도 만들지 않습니다. 첫 PeerLetter 호출이 DB를 만든 뒤에 붙습니다.
 
 **깨우기를 켜면 다르게 동작합니다.** 실제 호스트 세션을 알 수 있고 **PeerLetter를 사용한 적이 있는** 연결은 MCP 초기화 직후 참여하고, **도구 호출 없이** 깨우기 장치를 시작합니다.
 - PeerLetter 도구를 한 번도 호출하지 않은 세션(새 Claude·Pi 세션, Pi `/new`, Claude `/clear`)은 수동 클라이언트처럼 첫 도구 호출 전까지 참여하지 않습니다.
@@ -499,7 +501,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 ## SQLite와 유지 관리
 
 - **작업 공간 키:** 실제 Git 루트의 SHA-256입니다. Git 밖이면 실제 cwd를 씁니다. 한 체크아웃의 하위 디렉토리는 같은 메일함을 공유하고, 다른 worktree는 경로와 메일함이 따로입니다.
-- **기본 DB 위치:** `~/.local/state/peerletter/<key>/peerletter.db`입니다. `PEERLETTER_STATE_DIR`은 상태 루트를, `PEERLETTER_PROJECT`는 작업 공간을 바꿉니다.
+- **기본 DB 위치:** `~/.local/state/peerletter/<key>/peerletter.db`이며, 그 작업 공간에서 PeerLetter를 처음 사용할 때 만들어집니다. `PEERLETTER_STATE_DIR`은 상태 루트를, `PEERLETTER_PROJECT`는 작업 공간을 바꿉니다.
 - **권한과 신뢰 경계:**
   - 디렉토리는 0700, DB·WAL·SHM 파일은 0600입니다.
   - 로컬 OS 계정이 신뢰 경계입니다. CLI는 로컬의 어떤 이름 메일함으로도 행동할 수 있으며, 다른 사용자 간 인증이 아닙니다.
@@ -538,6 +540,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 - **등록과 이름:**
   - 모든 클라이언트의 수동 지연 등록, 조건부 시작 시 등록
   - PeerLetter를 사용한 적 없는 깨우기 세션이 DB를 만들지 않고 참여하지 않는지
+  - 사용하지 않은 작업 공간에 훅·watch·Pi 확장이 상태를 남기지 않는지, 범위를 제한한 안내문과 도구 annotation
   - 수신자가 도구를 호출하기 전의 Claude·Pi 깨우기
   - 모호한 공유 PID 훅 매핑, 첫 호출로 정하는 Codex 신원
   - 같은 세션의 이름 되찾기, 메일 격리, 스키마 1 이전, 살아 있는 소유자 보호

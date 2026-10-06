@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import { Store } from "../src/store.ts";
-import { resolveProject } from "../src/project.ts";
+import { locateProject, prepareProject } from "../src/project.ts";
 import { ancestors, agentKind } from "../src/process.ts";
 import { noticeText } from "../src/wake.ts";
 import { configuredClaudeWake } from "../src/claude.ts";
@@ -16,8 +16,11 @@ try {
   const event = input.hook_event_name;
   const session = input.session_id || input.thread_id;
   if (typeof session !== "string" || !session || typeof input.cwd !== "string") process.exit(0);
+  // A workspace that never used PeerLetter has no database: record nothing and create nothing there.
+  const project = locateProject(input.cwd);
+  if (!fs.existsSync(project.database)) process.exit(0);
   const host = ancestors().find(p => agentKind(p.name) === kind);
-  store = new Store(resolveProject(input.cwd));
+  store = new Store(prepareProject(project));
   const clearUi = (all = false) => {
     for (const reason of store!.gate(session).blocked_reasons) {
       if (reason.startsWith("permission:") && (all || reason === `permission:${input.tool_use_id || "unknown"}`)) store!.block(session,reason,false);

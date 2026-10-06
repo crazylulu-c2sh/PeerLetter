@@ -1,8 +1,9 @@
+import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { Store } from "./store.ts";
 import type { Agent } from "./store.ts";
-import { resolveProject } from "./project.ts";
+import { locateProject, prepareProject } from "./project.ts";
 import { agentKind, ancestors, isProcessAlive, claudeSession } from "./process.ts";
 import { MailError, validName, validUuid } from "./errors.ts";
 import { configuredClaudeWake } from "./claude.ts";
@@ -28,7 +29,7 @@ export async function watchMail(options: WatchOptions): Promise<boolean> {
   const timeout=options.timeoutMs ?? 0;
   if (!Number.isSafeInteger(timeout) || timeout < 0 || timeout > 86400000) throw new MailError("INVALID_ARGUMENT","timeout-ms must be 0–86400000.");
   const deadline=timeout ? Date.now()+timeout : Infinity;
-  let project=resolveProject(options.project || claudeSession()?.cwd,options.state);
+  let project=locateProject(options.project || claudeSession()?.cwd,options.state);
   const emit=options.emit || stdout;
   const diagnostic=options.diagnostic || ((message:string)=>console.error(`PeerLetter watch: ${message}`));
   let store:Store|undefined,claimed=false,notified=false,actor:Agent|undefined;
@@ -44,21 +45,31 @@ export async function watchMail(options: WatchOptions): Promise<boolean> {
     while (!options.signal?.aborted && Date.now()<deadline) {
       let sleep=options.pollMs ?? 750;
       try {
-        store ||= new Store(project);
         if (host && !isProcessAlive(host.pid,host.start)) return notified;
         if (follow) {
           const registry=claudeSession();
-          const mapping=store.hostSession("claude",parent!.pid);
+          const mapping=store?.hostSession("claude",parent!.pid);
           const newer=registry?.host_pid === parent!.pid && (registry.updated_at || 0) > (mapping?.updated_at || 0);
           const mapped=newer ? undefined : mapping?.session_id;
           const next=mapped || (registry?.host_pid === parent!.pid ? registry.session_id : undefined);
           if (next && next !== session) {
             validUuid(next,"INVALID_SESSION_ID");
-            const nextProject=resolveProject(options.project || registry?.cwd || project.cwd,options.state);
-            if (claimed) store.releaseWatch(session,token);
+            const nextProject=locateProject(options.project || registry?.cwd || project.cwd,options.state);
+            if (claimed) store!.releaseWatch(session,token);
             claimed=false; actor=undefined; session=next;
-            if (nextProject.key !== project.key) {store.close();store=new Store(nextProject);project=nextProject;}
+            if (nextProject.key !== project.key) {store?.close();store=undefined;project=nextProject;}
           }
+        }
+        if (!store) {
+          // A workspace that never used PeerLetter has no database: wait without creating one.
+          // A one-shot waiter has nothing to wait for before this session's next turn.
+          if (!fs.existsSync(project.database)) {
+            if (options.once) return notified;
+            report("Waiting for this workspace to use PeerLetter.");
+            await delay(options.pollMs ?? 750,undefined,{signal:options.signal});
+            continue;
+          }
+          store=new Store(prepareProject(project));
         }
         if (!claimed) {
           if (!store.claimWatch(session,sink,token)) return false;
