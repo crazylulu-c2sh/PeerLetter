@@ -148,6 +148,40 @@ test("Pi extension reads no terminal input and injects nothing while the current
   await handlers.get("session_shutdown")!({reason:"quit"});
 });
 
+test("A second Pi extension copy stays inactive instead of failing session_start",{timeout:10000},async t=>{
+  const {root,project}=temp(t);const state=path.join(root,"state"),session=randomUUID();
+  const oldState=process.env.PEERLETTER_STATE_DIR;process.env.PEERLETTER_STATE_DIR=state;
+  t.after(()=>{if(oldState===undefined)delete process.env.PEERLETTER_STATE_DIR;else process.env.PEERLETTER_STATE_DIR=oldState;});
+  const store=new Store(resolveProject(project,state));t.after(()=>store.close());
+  const servers=new Map<string,string>(),notices:any[]=[],warnings:string[]=[];
+  // Like Pi: a server name registered by another extension is rejected, and unregister removes only your own.
+  function load(extensionPath:string,options?:{node?:string}) {
+    const handlers=new Map<string,Function>(),commands=new Map<string,any>();
+    piExtension({on:(event:string,handler:Function)=>{handlers.set(event,handler);},registerCommand:(name:string,command:any)=>commands.set(name,command),
+      registerMcpServer:(name:string)=>{const owner=servers.get(name);
+        if(owner && owner!==extensionPath)throw new Error(`MCP server "${name}" is already registered by extension "${owner}"`);servers.set(name,extensionPath);},
+      unregisterMcpServer:(name:string)=>{if(servers.get(name)===extensionPath)servers.delete(name);},
+      sendMessage:(message:any)=>{notices.push(message);}} as unknown as ExtensionAPI,options);
+    return {handlers,commands};
+  }
+  const ctx={cwd:project,mode:"tui",sessionManager:{getSessionId:()=>session},isIdle:()=>true,
+    ui:{setStatus:()=>{},notify:(message:string,type:string)=>{if(type==="warning")warnings.push(message);}}} as unknown as ExtensionContext;
+  const local=load("/project/.pi/settings/peerletter.ts"),user=load("/home/.pi/agent/peerletter-extension.ts",{node:process.execPath});
+  await local.handlers.get("session_start")!({},ctx);
+  await user.handlers.get("session_start")!({},ctx);
+  assert.equal(servers.get("peerletter"),"/project/.pi/settings/peerletter.ts");
+  assert.equal(warnings.length,1);assert.match(warnings[0],/already registered/);
+  await user.commands.get("peerletter").handler("status",ctx);assert.equal(warnings.length,2,"The inactive copy explains itself");
+  const receiver=store.register({name:"pi",kind:"pi",session_id:session,host_pid:process.pid});
+  const sender=store.register({name:"codex",kind:"codex",session_id:randomUUID()});
+  store.send(sender,{to:"pi",text:"once",idempotency_key:"once"});
+  await new Promise(resolve=>setTimeout(resolve,850));assert.equal(notices.length,1,"Only the active copy notifies");
+  await user.handlers.get("session_shutdown")!({reason:"quit"});
+  assert.equal(store.agent(receiver.name)?.online,1,"The inactive copy does not close the active participant");
+  await local.handlers.get("session_shutdown")!({reason:"quit"});
+  assert.equal(store.agent(receiver.name)?.online,0);
+});
+
 function piRig(t:test.TestContext,project:string,state:string) {
   const oldState=process.env.PEERLETTER_STATE_DIR;process.env.PEERLETTER_STATE_DIR=state;
   t.after(()=>{if(oldState===undefined)delete process.env.PEERLETTER_STATE_DIR;else process.env.PEERLETTER_STATE_DIR=oldState;});

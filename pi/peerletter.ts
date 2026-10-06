@@ -18,6 +18,7 @@ export default function peerletter(pi: ExtensionAPI, options: {node?:string} = {
   let dialogs = 0;
   let compact = false;
   let closed = true;
+  let duplicate: string | undefined;
 
   function ownedActor(): Agent | undefined {
     const actor = store?.agentForSession(session,"pi");
@@ -92,15 +93,25 @@ export default function peerletter(pi: ExtensionAPI, options: {node?:string} = {
     }
   }
   pi.on("session_start",async (_,ctx) => {
-    close(); context = ctx; closed = false; dialogs = 0; compact = false;
-    session = ctx.sessionManager.getSessionId();
-    workspace = locateProject(ctx.cwd);
-    attach();
+    close(); duplicate = undefined;
+    const id = ctx.sessionManager.getSessionId();
     // Pi connects extension servers at startup. --session makes the opt-in wake connection
     // register on initialized if this session used PeerLetter; the extension never registers a second actor.
-    pi.registerMcpServer("peerletter", { command: options.node || process.execPath, exposure: "direct", timeout: 45,
-      args: [fileURLToPath(new URL("../src/stdio.ts",import.meta.url)),"--project",ctx.cwd,"--kind","pi",
-        "--session",session,"--wake","pi-extension", ...(process.env.PEERLETTER_NAME ? ["--name",process.env.PEERLETTER_NAME] : [])] });
+    try {
+      pi.registerMcpServer("peerletter", { command: options.node || process.execPath, exposure: "direct", timeout: 45,
+        args: [fileURLToPath(new URL("../src/stdio.ts",import.meta.url)),"--project",ctx.cwd,"--kind","pi",
+          "--session",id,"--wake","pi-extension", ...(process.env.PEERLETTER_NAME ? ["--name",process.env.PEERLETTER_NAME] : [])] });
+    } catch (error) {
+      // Global setup and an older project entry can load this extension twice. Pi rejects the second
+      // "peerletter" server; that copy stays inactive instead of failing session_start half attached.
+      duplicate = `PeerLetter extension inactive: ${error instanceof Error ? error.message : String(error)}. `
+        + "Keep one PeerLetter entry in ~/.pi/agent/settings.json or .pi/settings.json, then /reload.";
+      ctx.ui.notify(duplicate,"warning");
+      return;
+    }
+    context = ctx; closed = false; dialogs = 0; compact = false; session = id;
+    workspace = locateProject(ctx.cwd);
+    attach();
     timer = setInterval(poll,750); timer.unref();
   });
   pi.on("session_shutdown",close);
@@ -115,6 +126,7 @@ export default function peerletter(pi: ExtensionAPI, options: {node?:string} = {
   pi.on("session_compact",() => { compact = false; gate(); poll(); });
   pi.on("session_compact_failed",event => { compact = false; gate(); if (event.aborted) pause("user_abort"); });
   pi.registerCommand("peerletter", { description: "PeerLetter pause, resume or status", handler: async (args,ctx) => {
+    if (duplicate) { ctx.ui.notify(duplicate,"warning"); return; }
     const current = attach();
     if (!current) { ctx.ui.notify("PeerLetter is not used in this workspace yet.","info"); return; }
     if (args.trim() === "pause") pause("manual");

@@ -127,6 +127,15 @@ export class Store {
         const existing = this.get<{ value: string }>("SELECT value FROM metadata WHERE key='project'");
         if (existing && existing.value !== project.cwd) throw new MailError("PROJECT_MISMATCH", "Database belongs to another workspace.");
         this.run("INSERT OR IGNORE INTO metadata(key,value) VALUES('project',?)", project.cwd);
+        // A database from before used_sessions has no records, so its participants would stop rejoining
+        // automatically. Mail a host session sent proves an earlier PeerLetter tool call. Runs once.
+        if (!this.get("SELECT 1 FROM metadata WHERE key='used_sessions_backfill'")) {
+          for (const row of this.all<{ kind: string; session: string; used_at: number }>(`SELECT a.kind, m.from_session AS session,
+            MIN(m.created_at) AS used_at FROM messages m JOIN agents a ON a.name=m.from_name GROUP BY a.kind, m.from_session`)) {
+            if (hasHostSession(row.kind,row.session)) this.run("INSERT OR IGNORE INTO used_sessions VALUES(?,?,?)", row.kind, row.session, row.used_at);
+          }
+          this.run("INSERT INTO metadata(key,value) VALUES('used_sessions_backfill','1')");
+        }
       });
       for (const suffix of ["", "-wal", "-shm"]) {
         try { fs.chmodSync(project.database + suffix, 0o600); } catch { /* Sidecar may not exist. */ }
