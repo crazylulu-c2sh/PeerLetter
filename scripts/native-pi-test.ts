@@ -20,7 +20,7 @@ fs.writeFileSync(path.join(project,".pi/settings.json"),JSON.stringify({extensio
 applyGlobal({client:"pi",home});
 const settings=JSON.parse(fs.readFileSync(path.join(agentDir,"settings.json"),"utf8"));settings.defaultProjectTrust="never";
 fs.writeFileSync(path.join(agentDir,"settings.json"),JSON.stringify(settings));
-let requests=0,sawNotice=false,providerError:Error|undefined;
+let requests=0,sawNotice=false,joinedBeforeUse:boolean|undefined,providerError:Error|undefined;
 const provider=http.createServer(async(req,res)=>{
   try {
     if (req.method !== "POST" || !req.url?.endsWith("/chat/completions")) {res.writeHead(404);res.end();return;}
@@ -29,6 +29,8 @@ const provider=http.createServer(async(req,res)=>{
     let delta:any,finish="stop";
     if (index === 1) {
       const tool=input.tools?.find((t:any)=>t.function?.name.endsWith("peerletter_whoami"));assert.ok(tool,"Global PeerLetter tool missing");
+      // Pi listed the tools, so the MCP has initialized; this new session has never used PeerLetter.
+      joinedBeforeUse=!!store.get("SELECT 1 FROM agents WHERE kind='pi'");
       delta={role:"assistant",tool_calls:[{index:0,id:randomUUID(),type:"function",function:{name:tool.function.name,arguments:"{}"}}]};finish="tool_calls";
     } else {
       if (index === 3) {
@@ -60,17 +62,17 @@ async function until(fn:()=>boolean,label:string) {
   while(!fn()) {if(providerError)throw providerError;if(child.exitCode !== null || Date.now()>end)throw new Error(`${label}: ${errors.slice(-3000)}`);await new Promise(r=>setTimeout(r,50));}
 }
 try {
-  await until(()=>!!store.get<Agent>("SELECT * FROM agents WHERE kind='pi' AND online=1"),"Global Pi startup registration");
-  const actor=store.get<Agent>("SELECT * FROM agents WHERE kind='pi' AND online=1")!;
-  assert.equal(actor.wake,"pi-extension");assert.equal(store.publicAgent(actor).session_binding.state,"bound");
   child.stdin.write(JSON.stringify({id:"fixture-start",type:"prompt",message:"Run the PeerLetter identity fixture."})+"\n");
   await until(()=>requests === 2 && events.some(e=>e.type === "agent_settled"),"Initial Pi turn");
+  assert.equal(joinedBeforeUse,false,"An unused Pi session joined before its first PeerLetter tool call");
+  const actor=store.get<Agent>("SELECT * FROM agents WHERE kind='pi' AND online=1")!;assert.ok(actor,"First whoami must join");
+  assert.equal(actor.wake,"pi-extension");assert.equal(store.publicAgent(actor).session_binding.state,"bound");
   const sender=store.cliActor("fixture-sender");
   const mail=store.send(sender,{to:actor.name,text:"PRIVATE-PI-MAIL-BODY",idempotency_key:"native-pi-idle"}).message;
   await until(()=>requests === 3 && sawNotice && store.status(sender,mail.id).state === "notified","Native Pi idle wake");
   await new Promise(r=>setTimeout(r,1000));assert.equal(requests,3);assert.equal(store.status(sender,mail.id).acknowledged_at,null);
   assert.ok(!errors.includes("UNTRUSTED-PROJECT-EXTENSION-LOADED"));
-  console.log(JSON.stringify({passed:true,client:"installed Pi CLI 0.99.2 RPC",global_setup:true,project_trusted:false,startup_bound:true,
+  console.log(JSON.stringify({passed:true,client:"installed Pi CLI 0.99.2 RPC",global_setup:true,project_trusted:false,unused_startup_joined:false,first_call_bound:true,
     idle_native_wakes:1,provider_requests:requests,external_model_requests:0}));
 } finally {
   child.stdin.end();await Promise.race([new Promise(r=>child.once("exit",r)),new Promise(r=>setTimeout(r,2000))]);

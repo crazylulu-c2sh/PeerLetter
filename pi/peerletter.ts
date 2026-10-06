@@ -81,8 +81,8 @@ export default function peerletter(pi: ExtensionAPI, options: {node?:string} = {
     store.bindSession("pi",process.pid,session);
     // Never clear a user's persisted pause just because the extension reloaded.
     gate();
-    // Pi connects extension servers at startup. --session makes the opt-in wake
-    // connection register on initialized; the extension never registers a second actor.
+    // Pi connects extension servers at startup. --session makes the opt-in wake connection
+    // register on initialized if this session used PeerLetter; the extension never registers a second actor.
     pi.registerMcpServer("peerletter", { command: options.node || process.execPath, exposure: "direct", timeout: 45,
       args: [fileURLToPath(new URL("../src/stdio.ts",import.meta.url)),"--project",ctx.cwd,"--kind","pi",
         "--session",session,"--wake","pi-extension", ...(process.env.PEERLETTER_NAME ? ["--name",process.env.PEERLETTER_NAME] : [])] });

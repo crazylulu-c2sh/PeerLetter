@@ -55,9 +55,9 @@ test("startup probe requires opt-in wake and connection-specific identity withou
   assert.equal(startupRegistration("pi",{wake:"pi-extension"},{}).binding,undefined);
 });
 
-test("Claude host environment joins at initialization and wakes without a receiver tool call",{timeout:10000},async t=>{
+test("a used Claude host session joins at initialization and wakes without a receiver tool call",{timeout:10000},async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-channel-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
-  const store=new Store(resolveProject(project,state)),session=randomUUID();
+  const store=new Store(resolveProject(project,state)),session=randomUUID();store.recordUse("claude",session);
   const receiver=await client(undefined,"claude-code",project,state,["--wake","claude-channel"],undefined,true,{CLAUDE_CODE_SESSION_ID:session});
   t.after(async()=>{await receiver.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
   const notices:string[]=[];
@@ -83,7 +83,7 @@ test("Claude host environment joins at initialization and wakes without a receiv
 test("Codex explicitly pinned connection queues a body-free wake before any tools/call",{timeout:10000},async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-queue-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
   const session=randomUUID(),daemon=await codexDaemon(t,root,session);
-  const store=new Store(resolveProject(project,state));
+  const store=new Store(resolveProject(project,state));store.recordUse("codex",session);
   const receiver=await client(undefined,"codex",project,state,["--wake","codex-queue","--session",session],undefined,true,
     {PEERLETTER_CODEX_SOCKET:daemon.socket});
   t.after(async()=>{await receiver.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
@@ -118,6 +118,27 @@ test("overwritten shared-PID Codex hooks and inherited IDs cannot register an un
   assert.notEqual(who.session_id,last);
 });
 
+test("a wake-enabled host session that never used PeerLetter stays out until its first tool call, then rejoins at startup",{timeout:20000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-unused-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const connections:Awaited<ReturnType<typeof client>>[]=[];let store:Store|undefined;
+  t.after(async()=>{await Promise.all(connections.map(c=>c.sdk.close()));store?.close();fs.rmSync(root,{recursive:true,force:true});});
+  const open=async(kind:string,extra:string[])=>{const c=await client(undefined,kind,project,state,extra,undefined,true);connections.push(c);await c.sdk.listTools();return c;};
+  await open("claude",["--wake","claude-channel","--session",randomUUID()]);
+  assert.equal(fs.existsSync(resolveProject(project,state).database),false,"A declined startup must not create the workspace database");
+  store=new Store(resolveProject(project,state));
+  for(const [kind,wake] of [["claude","claude-channel"],["codex","codex-queue"],["pi","pi-extension"]]) {
+    const session=randomUUID(),extra=["--wake",wake,"--session",session];
+    const unused=await open(kind,extra);
+    assert.equal(store.agentForSession(session,kind),undefined,`${kind} joined without having used PeerLetter`);
+    const first=(await unused.call("whoami")).value;
+    assert.equal(first.registration.mode,"tool-call");assert.equal(store.usedSession(kind,session),true);
+    await unused.sdk.close();
+    await open(kind,extra);
+    await eventually(()=>!!store!.agentForSession(session,kind),`${kind} must rejoin a used session at startup`);
+    assert.equal(store.agentForSession(session,kind)!.name,first.name);
+  }
+});
+
 test("wake without a usable startup identity stays lazy for every client",{timeout:15000},async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-deferred-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
   const store=new Store(resolveProject(project,state)),connections:Awaited<ReturnType<typeof client>>[]=[];
@@ -134,7 +155,7 @@ test("startup identity preserves names, separate inboxes, persisted pauses and s
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-startup-resume-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
   const store=new Store(resolveProject(project,state)),session=randomUUID(),connections:Awaited<ReturnType<typeof client>>[]=[];
   t.after(async()=>{await Promise.all(connections.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
-  const open=async(id:string)=>{const c=await client(undefined,"claude",project,state,["--wake","claude-channel","--session",id],undefined,true);connections.push(c);await c.sdk.listTools();return c;};
+  const open=async(id:string)=>{store.recordUse("claude",id);const c=await client(undefined,"claude",project,state,["--wake","claude-channel","--session",id],undefined,true);connections.push(c);await c.sdk.listTools();return c;};
   const first=await open(session),actor=store.agentForSession(session,"claude")!;assert.ok(actor);
   const sender=store.register({name:"sender",kind:"pi",session_id:randomUUID()});store.pause(session,"manual");
   const mail=store.send(sender,{to:actor.name,text:"private original inbox",idempotency_key:"original-startup"}).message;
@@ -152,7 +173,7 @@ test("startup name/session collisions keep original errors and retry when the ow
   const store=new Store(resolveProject(project,state)),connections:Awaited<ReturnType<typeof client>>[]=[];
   t.after(async()=>{await Promise.all(connections.map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
   for(const name of ["role",undefined]) {
-    const session=randomUUID(),extra=["--wake","claude-channel","--session",session];
+    const session=randomUUID(),extra=["--wake","claude-channel","--session",session];store.recordUse("claude",session);
     const owner=await client(name,"claude",project,state,extra,undefined,true);connections.push(owner);await owner.sdk.listTools();
     const original=store.agentForSession(session,"claude")!;assert.ok(original);
     const duplicate=await client(name,"claude",project,state,extra,undefined,true);connections.push(duplicate);await duplicate.sdk.listTools();
@@ -181,7 +202,8 @@ test("a new startup role owner skips old backlog but leaves it available to rece
   const store=new Store(resolveProject(project,state));store.cliActor("role");
   const sender=store.register({name:"sender",kind:"pi",session_id:randomUUID()});
   const old=store.send(sender,{to:"role",text:"OLD-BODY",idempotency_key:"old-backlog"}).message;
-  const receiver=await client("role","claude",project,state,["--session",randomUUID(),"--wake","claude-channel"],undefined,true);
+  const session=randomUUID();store.recordUse("claude",session);
+  const receiver=await client("role","claude",project,state,["--session",session,"--wake","claude-channel"],undefined,true);
   t.after(async()=>{await receiver.sdk.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
   const notices:string[]=[];
   receiver.sdk.setNotificationHandler(z.object({method:z.literal("notifications/claude/channel"),params:z.object({content:z.string()})}),n=>{notices.push(n.params.content);});

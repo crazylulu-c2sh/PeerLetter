@@ -162,7 +162,7 @@ function piRig(t:test.TestContext,project:string,state:string) {
 
 test("Pi startup wakes without tools/call and keeps UI and compaction gates",{timeout:10000},async t=>{
   const {root,project}=temp(t),state=path.join(root,"state"),session=randomUUID();
-  const rig=piRig(t,project,state),store=new Store(resolveProject(project,state));
+  const rig=piRig(t,project,state),store=new Store(resolveProject(project,state));store.recordUse("pi",session);
   try {
     const sdk=await rig.start("startup",session),receiver=store.agentForSession(session,"pi")!;
     assert.ok(receiver);assert.equal(receiver.host_pid,process.pid);
@@ -179,12 +179,12 @@ test("Pi startup wakes without tools/call and keeps UI and compaction gates",{ti
   } finally {await rig.cleanup();store.close();}
 });
 
-test("Pi extension /new isolates mail and leases; resume reuses the real session's name",{timeout:15000},async t=>{
+test("Pi extension /new isolates mail and leases and waits for use; resume reuses the real session's name",{timeout:15000},async t=>{
   const {root,project}=temp(t),state=path.join(root,"state"),session=randomUUID();
-  const rig=piRig(t,project,state),store=new Store(resolveProject(project,state));
+  const rig=piRig(t,project,state),store=new Store(resolveProject(project,state));store.recordUse("pi",session);
   try {
     const first=await rig.start("startup",session);
-    assert.equal(store.peers().length,1,"The session-bound wake MCP must join at startup without tools/call");
+    assert.equal(store.peers().length,1,"A used session-bound wake MCP must join at startup without tools/call");
     const original=await rig.call(first,"whoami");
     assert.equal(original.session_id,session);assert.equal(original.session_binding.state,"bound");
     const actor=store.agent(original.name)!;assert.equal(actor.host_pid,process.pid);
@@ -196,15 +196,16 @@ test("Pi extension /new isolates mail and leases; resume reuses the real session
     assert.equal(store.agent(original.name)?.online,0);assert.equal(store.leaseList().some(l=>l.id===lease.id),false);
     assert.equal(store.sessionFor("pi",[process.pid]),undefined,"A closed adapter must not leave a stale host mapping");
     const nextSession=randomUUID(),next=await rig.start("new",nextSession);
-    assert.equal(store.peers().filter(p=>p.kind === "pi" && p.online).length,1);
+    assert.equal(store.peers().filter(p=>p.kind === "pi" && p.online).length,0,"A new session that never used PeerLetter waits for its first tool call");
     const nextIdentity=await rig.call(next,"whoami");
     assert.notEqual(nextIdentity.name,original.name);assert.equal(nextIdentity.session_id,nextSession);
+    assert.equal(nextIdentity.registration.mode,"tool-call");
     assert.equal((await rig.call(next,"receive")).messages.length,0);
     await rig.handlers.get("ui_prompt_end")!({});assert.equal(rig.notices.length,0);
     assert.equal(store.status(sender,mail.id).state,"accepted");
     await rig.shutdown("resume");const resumed=await rig.start("resume",session);
     const resumedIdentity=await rig.call(resumed,"whoami");
-    assert.equal(resumedIdentity.name,original.name);assert.equal(resumedIdentity.delivery_gate.pause_reason,"manual");
+    assert.equal(resumedIdentity.name,original.name);assert.equal(resumedIdentity.registration.mode,"startup");assert.equal(resumedIdentity.delivery_gate.pause_reason,"manual");
     assert.equal((await rig.call(resumed,"receive")).messages[0].id,mail.id);
     await Promise.all(rig.closing);
     assert.equal(store.agent(original.name)?.online,1,"Late shutdown of the old MCP must not close the resumed owner");

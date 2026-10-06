@@ -35,7 +35,7 @@ git clone https://github.com/crazylulu-c2sh/PeerLetter.git ~/dev/PeerLetter
 >
 > Use PeerLetter to communicate with the other agents.
 
-skill은 **whoami → peers**를 호출하고 실제 이름·참가자·세션 연결·깨우기 상태를 보고한 뒤 메일을 받습니다. 첫 whoami는 **에이전트가 호출하는 MCP 도구**이며 셸의 `whoami` 명령이 아닙니다. Codex는 새 MCP 연결마다 첫 호출이 필요합니다. 전역 설치만으로 공유 데몬의 thread를 알아낼 수는 없습니다. `/mcp`는 상태만 보여 주며 서버를 재시작하지 않습니다. Codex 0.160.0에서는 TUI 종료, 의도적인 공유 앱서버 데몬 재시작, 같은 thread resume으로 MCP를 다시 연결할 수 있습니다. 데몬 재시작은 다른 클라이언트 연결도 끊습니다.
+skill은 **whoami → peers**를 호출하고 실제 이름·참가자·세션 연결·깨우기 상태를 보고한 뒤 메일을 받습니다. PeerLetter를 사용한 세션만 참여합니다. 자동 깨우기를 설치했더라도 PeerLetter 도구를 한 번도 호출하지 않은 세션은 참여자로 나타나지 않고, 사용한 적이 있는 세션은 MCP 재연결·재시작·resume 뒤 자동으로 다시 참여합니다. 첫 whoami는 **에이전트가 호출하는 MCP 도구**이며 셸의 `whoami` 명령이 아닙니다. Codex는 새 MCP 연결마다 첫 호출이 필요합니다. 전역 설치만으로 공유 데몬의 thread를 알아낼 수는 없습니다. `/mcp`는 상태만 보여 주며 서버를 재시작하지 않습니다. Codex 0.160.0에서는 TUI 종료, 의도적인 공유 앱서버 데몬 재시작, 같은 thread resume으로 MCP를 다시 연결할 수 있습니다. 데몬 재시작은 다른 클라이언트 연결도 끊습니다.
 
 기존 프로젝트 로컬 PeerLetter 설정은 전역 설정을 덮거나 경쟁할 수 있습니다. setup은 현재 디렉토리의 관련 파일을 안내하지만 프로젝트를 수정하거나 다른 체크아웃들을 검색하지 않습니다. 전환 전에 백업하고, 기존 PeerLetter MCP·플러그인·훅·확장·skill 항목만 제거하거나 비활성화하세요. 다른 설정은 유지하세요. 이전에 설치한 다른 프로젝트도 확인하세요. 프로젝트 `.claude/peerletter.json`에 `none`이 남으면 전역 monitor를 멈출 수 있으므로, 전환할 때 이 소유 설정 파일도 갱신하거나 제거하세요. 같은 세션에 PeerLetter MCP를 두 개 실행하지 마세요.
 
@@ -131,7 +131,10 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 - 그래서 쓰지 않는 수동 클라이언트, 불러오기만 한 thread, 서브에이전트가 참여자로 나타나지 않습니다.
 - 아직 참여하지 않은 세션도 훅은 문제없이 처리합니다.
 
-**깨우기를 켜면 다르게 동작합니다.** 실제 호스트 세션을 알 수 있는 연결은 MCP 초기화 직후 참여하고, **도구 호출 없이** 깨우기 장치를 시작합니다.
+**깨우기를 켜면 다르게 동작합니다.** 실제 호스트 세션을 알 수 있고 **PeerLetter를 사용한 적이 있는** 연결은 MCP 초기화 직후 참여하고, **도구 호출 없이** 깨우기 장치를 시작합니다.
+- PeerLetter 도구를 한 번도 호출하지 않은 세션(새 Claude·Pi 세션, Pi `/new`, Claude `/clear`)은 수동 클라이언트처럼 첫 도구 호출 전까지 참여하지 않습니다.
+- 첫 도구 호출이 그 호스트 세션을 작업 공간 DB에 "사용함"으로 기록합니다. 이후 같은 세션의 연결(재연결, resume으로 재시작, `/resume`)은 자동으로 참여합니다.
+- 참여하지 않기로 한 시작은 DB를 만들지 않습니다.
 
 | 클라이언트 | 시작 시 등록에 인정하는 신원 |
 |---|---|
@@ -147,8 +150,9 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 - 관계없는 여러 thread가 쓰는 공유 설정에 고정 `--session`을 넣지 마세요. 의도적으로 관리하는 연결에만 씁니다.
 
 **`peerletter_whoami`로 정확한 이름, 연결 상태, 깨우기 상태를 확인하세요.**
-- `registration.mode`는 `startup` 또는 `tool-call`입니다.
-- 시작 시 등록이 실패하면 stderr에 기록하고, 횟수와 간격을 제한해 재시도합니다. 도구 호출은 원래 오류를 돌려주며 역시 재시도할 수 있습니다.
+- `registration.mode`는 `startup`(도구 호출 없이 참여) 또는 `tool-call`입니다.
+- 사용한 적 없는 세션이라 시작 시 등록을 미루면 stderr에 한 번 기록하고 재시도하지 않습니다.
+- 그 밖의 이유로 시작 시 등록이 실패하면 stderr에 기록하고, 횟수와 간격을 제한해 재시도합니다. 도구 호출은 원래 오류를 돌려주며 역시 재시도할 수 있습니다.
 - 살아 있는 소유자를 밀어내지 않습니다. 같은 세션을 새 연결이 가져가려면 다시 불러오기(reload)로 이전 연결을 먼저 닫아야 합니다.
 - 시작 시 참여한다고 해서 호스트의 channel 권한이나 훅 신뢰가 생기지는 않습니다.
 
@@ -292,9 +296,9 @@ node /path/to/PeerLetter/src/cli.ts --project /path/to/project \
 
 ### Claude `/resume`과 `/clear`
 
-Claude는 MCP를 다시 띄우지 않고 현재 세션을 바꿀 수 있습니다. 상속된 `CLAUDE_CODE_SESSION_ID`는 이때 이전 값으로 남습니다. PeerLetter는 **자기 Claude ancestor**의 현재 registry 또는 그 살아 있는 호스트의 검증된 SessionStart 매핑을 따라갑니다. 다른 프로세스의 최근 세션을 고르지 않습니다. MCP는 새 도구 호출 없이 신원을 갱신하고, 계속 실행되는 monitor는 이전 감시 소유권을 놓고 실제 새 세션에 붙습니다. 호스트 신원을 확인할 수 없다면 다시 연결하세요.
+Claude는 MCP를 다시 띄우지 않고 현재 세션을 바꿀 수 있습니다. 상속된 `CLAUDE_CODE_SESSION_ID`는 이때 이전 값으로 남습니다. PeerLetter는 **자기 Claude ancestor**의 현재 registry 또는 그 살아 있는 호스트의 검증된 SessionStart 매핑을 따라갑니다. 다른 프로세스의 최근 세션을 고르지 않습니다. 계속 실행되는 monitor는 이전 감시 소유권을 놓고 실제 새 세션에 붙습니다. 호스트 신원을 확인할 수 없다면 다시 연결하세요.
 
-이전 자동 참가자는 오프라인이 되고 자기 lease를 해제합니다. 같은 실제 세션을 resume하면 자동 이름을 되찾고, `/clear`는 다른 메일함을 받습니다. 메일과 수동 pause는 원래 세션에 남습니다. 명시적인 역할 이름은 의도한 비세션 지정 메일을 유지하며, `--session`은 고정되어 따라가지 않습니다. 살아 있는 소유자와 충돌하면 상대 참가자를 가져가거나 이전 actor의 lease를 해제하지 않고 실패합니다. watch 프로세스 자체는 MCP 온라인 상태나 lease를 바꾸지 않습니다.
+이전 자동 참가자는 오프라인이 되고 자기 lease를 해제합니다. MCP는 새 세션이 PeerLetter를 사용한 적이 있을 때만(예: 이전에 참여한 세션의 `/resume`) 도구 호출 없이 그 세션에 참여하고, 그 세션의 자동 이름을 되찾습니다. `/clear`나 PeerLetter를 쓴 적 없는 대화로 바꾸면 MCP는 참여자 없이 기다립니다. 그 세션의 첫 PeerLetter 도구 호출은 다른 자동 메일함으로 참여하고, 나중에 사용한 세션으로 바꾸면 자동으로 다시 참여합니다. 메일과 수동 pause는 원래 세션에 남습니다. 명시적인 역할 이름은 의도한 비세션 지정 메일을 유지하며, `--session`은 고정되어 따라가지 않습니다. 살아 있는 소유자와 충돌하면 상대 참가자를 가져가거나 이전 actor의 lease를 해제하지 않고 실패합니다. watch 프로세스 자체는 MCP 온라인 상태나 lease를 바꾸지 않습니다.
 
 체크아웃을 업데이트한 뒤 이미 로드된 MCP 코드는 **Claude 재시작**으로 교체해야 합니다. `/reload-plugins`는 플러그인 검색을 갱신하지만 기존 MCP를 다시 띄우거나 기존 monitor를 다시 시작한다고 보장하지 않으므로, 이번 런타임 수정 적용에는 충분하지 않습니다. 이전 MCP가 시작 시 세션 ID를 잡고 있다면 `claude --resume <SESSION_UUID>`로 직접 시작하는 것이 재연결 전까지의 우회 방법입니다. 전환 후 `whoami.session_id`, 정확한 이름, `wake_runner.online`, `wake_error`, `delivery_gate`를 확인하세요.
 
@@ -366,7 +370,7 @@ claude --dangerously-load-development-channels server:peerletter
 - 계정과 버전별 지원 여부는 [channels 공식 문서](https://code.claude.com/docs/en/channels-reference)에서 확인하세요.
 - 이 방식에서는 channel과 경쟁하지 않도록 작업 중 메일 알림을 끕니다. 수동 Stop/PostToolUse 알림을 쓰려면 none으로 바꾸세요.
 
-재시작한 MCP가 `CLAUDE_CODE_SESSION_ID`를 물려받으면, 첫 whoami 호출 없이 등록하고 감시합니다. 초기화 때 실제 세션을 식별할 수 없으면 whoami를 한 번 호출해 참여하세요. `--wake` 플래그를 저장해 두는 것만으로는 Claude 호스트의 channel 활성화를 건너뛸 수 없습니다.
+재시작한 MCP가 PeerLetter를 사용한 세션의 `CLAUDE_CODE_SESSION_ID`를 물려받으면, 첫 whoami 호출 없이 등록하고 감시합니다. 새 세션이거나 초기화 때 실제 세션을 식별할 수 없으면 whoami를 한 번 호출해 참여하세요. `--wake` 플래그를 저장해 두는 것만으로는 Claude 호스트의 channel 활성화를 건너뛸 수 없습니다.
 
 ### Codex queue
 
@@ -415,7 +419,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
 - 이 보호는 훅이 실행될 때만 동작합니다. 검토되지 않았거나 꺼진 Interrupt 훅은 호스트의 정지 상태를 알려 줄 수 없습니다.
 
 **시작 시 등록**
-- 큐의 시작 시 등록은 `--session <실제 thread UUID>`로 고정한 연결에서만 됩니다.
+- 큐의 시작 시 등록은 PeerLetter를 사용한 thread를 `--session <실제 thread UUID>`로 고정한 연결에서만 됩니다.
 - 공유 데몬의 PID 매핑과 물려받은 환경 변수 ID는 SessionStart 훅을 승인한 뒤에도 충분하지 않습니다.
 - 일반 설치 설정에서는 재시작한 뒤 whoami를 한 번 호출하세요. 첫 도구 요청이 실제 thread를 알려 줍니다.
 - 재시작만으로는 식별되지 않은 Codex thread의 자동 깨우기를 보장할 수 없습니다.
@@ -436,7 +440,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 **파일 MCP 방식과의 차이**
 - 기본 파일 MCP 방식은 Pi 세션 ID가 없고 `/new`를 감지하지 못합니다. whoami에 `unbound`로 나옵니다. 실제 세션 신원과 세션 전환을 쓰려면 확장 방식을 쓰세요.
 - `/new`, resume, fork, reload, 종료 때 확장은 자기 참여자만 닫고, 파일 점유를 풀고, 감시를 멈춥니다.
-- 다음 세션의 MCP는 초기화 때 참여하고, 확장은 첫 도구 호출 없이도 알릴 수 있습니다. 확장은 참여자를 따로 할당하지 않고, 내부에서 whoami를 호출하지도 않습니다.
+- 다음 세션이 PeerLetter를 사용한 적이 있으면(resume, reload) 그 MCP는 초기화 때 참여하고, 확장은 첫 도구 호출 없이도 알릴 수 있습니다. `/new` 세션은 첫 PeerLetter 도구 호출까지 기다립니다. 확장은 참여자를 따로 할당하지 않고, 내부에서 whoami를 호출하지도 않습니다.
 - 같은 실제 세션을 이어받으면 오프라인 자동 이름을 다시 쓰고, `/new`는 다른 자동 이름을 받습니다. 명시적으로 정한 역할 이름은 보존된 받은편지함을 이어갑니다.
 - 같은 세션을 다른 Pi 프로세스에서 불러와도, 첫 프로세스의 참여자 소유권을 가져가지 못합니다.
 
@@ -499,6 +503,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
   - 예전 체크아웃은 이전된 DB를 열 수 없으니, 모든 클라이언트를 이 체크아웃으로 업데이트하고 다시 연결하세요.
 - **추가 테이블:**
   - `watch_owners`는 Claude watch 프로세스를 조율합니다. 참여자·세션 신원을 대체하거나, 받은편지함을 만료시키거나, 전달·ACK 기록을 바꾸지 않습니다.
+  - `used_sessions`는 PeerLetter 도구를 호출한 호스트 세션을 기록하며, 이 세션만 자동으로 참여합니다. 이전 체크아웃의 DB에는 아직 기록이 없으므로, 업데이트한 뒤 세션마다 whoami를 한 번 호출하세요.
   - `codex_wakes`는 대기 중인 Codex 큐 알림의 소유권을 보존합니다. 아직 대기 중인 알림을 취소하면 그 미확인 메일이 다른 알림의 대상이 될 수 있습니다. 수신과 ACK 상태는 보존됩니다.
 - **보관:** 수동으로 정리합니다. `prune --days 30`은 모든 메시지가 ACK됐고 ACK가 30일보다 오래된 스레드 전체의 삭제 대상을 미리 보여 주고, `--apply`로 삭제합니다. 자동 삭제는 없습니다.
 - **점검:** `doctor`는 권한과 SQLite 무결성을 확인합니다. `doctor --checkpoint`는 TRUNCATE checkpoint를 요청하니, 사용량이 적을 때 실행하고 busy 결과를 확인하세요.
@@ -521,6 +526,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 - **기본 동작:** 동시 쓰기, 중복 제거, 답장 방향, 중요도 커서, 원자적 ACK 소유권, 취소, 파일 점유, 재시작 후 보존, SIGKILL 감지, 권한, 알림 게이트, Claude channel 형식.
 - **등록과 이름:**
   - 모든 클라이언트의 수동 지연 등록, 조건부 시작 시 등록
+  - PeerLetter를 사용한 적 없는 깨우기 세션이 DB를 만들지 않고 참여하지 않는지
   - 수신자가 도구를 호출하기 전의 Claude·Pi 깨우기
   - 모호한 공유 PID 훅 매핑, 첫 호출로 정하는 Codex 신원
   - 같은 세션의 이름 되찾기, 메일 격리, 스키마 1 이전, 살아 있는 소유자 보호
@@ -543,9 +549,9 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 |---|---|---|
 | `pnpm run test:native-codex` | 설치된 Codex | 격리 설정에서 실제 `codex exec`를 가짜 Responses 제공자로 실행하고, MCP 환경에서 `CODEX_THREAD_ID`를 뺀 상태로 기본 메타데이터가 Codex가 내보내는 것과 같은 thread ID로 연결되는지 |
 | `pnpm run test:native-codex-queue` | 설치된 Codex, Python 3, Unix PTY | 격리된 앱서버와 실제 대화형 TUI를 가짜 Responses 제공자로 띄워, 바쁜 턴에서 받고 ACK한 여러 메일은 추가 턴 0건, 읽지 않은 메일은 턴이 끝난 뒤 1회, 쉬는 상태 메일은 1회 깨우는지 |
-| `pnpm run test:native-pi` | 설치된 Pi 0.99.2 SDK·CLI | 격리된 전역 설치·RPC·가짜 chat 제공자로 프로젝트 신뢰 없이 시작 시 실제 세션 등록과 idle 메일 깨우기 1회 |
+| `pnpm run test:native-pi` | 설치된 Pi 0.99.2 SDK·CLI | 격리된 전역 설치·RPC·가짜 chat 제공자로 프로젝트 신뢰 없이, 새 세션이 첫 도구 호출 전에는 참여하지 않고 이후 idle 메일 깨우기 1회 |
 | `pnpm run test:native-global-setup` | 설치된 Claude Code, pnpm 다운로드를 위한 네트워크 | 빈 HOME·의존성 없는 임시 체크아웃에서 실제 `setup all`, 사용자 플러그인 범위와 SQLite 확인 후 전체 삭제 |
-| `pnpm run test:native-claude` | 설치된 Claude Code, Python 3, Unix PTY | 임시 프로젝트에 **async-rewake**를 설치하고, 메일만으로 본문 없는 알림이 담긴 다음 대화형 모델 턴이 시작되는지 |
+| `pnpm run test:native-claude` | 설치된 Claude Code, Python 3, Unix PTY | 임시 프로젝트에 **async-rewake**를 설치하고 "사용함"으로 기록한 세션을 띄워, 도구 호출 없이 참여하고 메일만으로 본문 없는 알림이 담긴 다음 대화형 모델 턴이 시작되는지 |
 
 - **공통:**
   - 가짜 응답 서버(loopback)만 쓰고 외부 모델을 호출하지 않습니다.
@@ -558,14 +564,14 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
   - 가짜 API 키로 로컬 가짜 Anthropic 제공자에 연결하며, channel 플래그를 쓰지 않습니다. 픽스처는 ACK하지 않습니다.
   - 초기 설정 화면 자동화는 버전에 따라 달라질 수 있으며, Claude Code 2.1.287로 테스트했습니다.
   - 이 클라이언트의 로컬 API 키 구성에서는 Monitor를 쓸 수 없어서, monitor 경로는 Monitor를 지원하는 대화형 계정·제공자에서 따로 확인해야 합니다.
-  - `pnpm run test:native-claude -- --session-transitions`는 실제 `/clear`·`/resume <UUID>` UI 명령을 입력하고, resume 때 MCP를 다시 띄우지 않고 실제 세션·이름이 복구되는지와 이후 async-rewake의 idle 깨우기를 확인합니다. Monitor가 없는 제공자에서 Monitor까지 검증하지는 않습니다.
+  - `pnpm run test:native-claude -- --session-transitions`는 실제 `/clear`·`/resume <UUID>` UI 명령을 입력하고, `/clear` 뒤 사용하지 않은 세션에 참여하지 않고 떠나는지, resume 때 MCP를 다시 띄우지 않고 실제 세션·이름이 복구되는지와 이후 async-rewake의 idle 깨우기를 확인합니다. Monitor가 없는 제공자에서 Monitor까지 검증하지는 않습니다.
   - 기본 CI SDK 테스트와는 별개인 선택 테스트입니다.
 
 **전역 설치·세션 전환 테스트**
 
-`test:native-pi`는 실제 Pi 0.99.2 CLI를 RPC 모드로 시작합니다. 격리된 사용자 전역 설치, 로컬 가짜 제공자, 신뢰하지 않은 프로젝트 리소스를 사용하며 도구 호출 전 실제 세션 등록과 메일 본문·ACK 없는 idle 깨우기 1회를 확인합니다. 외부 모델을 호출하지 않으며 CI에서도 실행합니다.
+`test:native-pi`는 실제 Pi 0.99.2 CLI를 RPC 모드로 시작합니다. 격리된 사용자 전역 설치, 로컬 가짜 제공자, 신뢰하지 않은 프로젝트 리소스를 사용하며, 새 세션이 첫 PeerLetter 도구 호출 전에는 참여하지 않는지와 메일 본문·ACK 없는 idle 깨우기 1회를 확인합니다. 외부 모델을 호출하지 않으며 CI에서도 실행합니다.
 
-임시 HOME에서 세 호스트 설치, 다른 설정과 이후 변경 보존, 다른 설정·수정된 관리 블록 거부, 프로젝트 신뢰 없이 실제 Pi 사용자 확장·skill 로드, 호출한 Codex thread의 Git 루트 선택을 검증합니다. Claude 전환 픽스처는 실제 ancestor 프로세스·MCP·watch를 실행하고 문서화된 registry·훅 변경을 재현합니다. `/clear`·`/resume`, 이전 환경 변수, 도구 재호출 없이 등록, 자동 이름 복구, pause·메일·lease 격리, 명시 세션 고정, 실패 시 rollback을 확인합니다. 모든 호스트·제공자가 Monitor를 제공한다는 증거는 아닙니다.
+임시 HOME에서 세 호스트 설치, 다른 설정과 이후 변경 보존, 다른 설정·수정된 관리 블록 거부, 프로젝트 신뢰 없이 실제 Pi 사용자 확장·skill 로드, 호출한 Codex thread의 Git 루트 선택을 검증합니다. Claude 전환 픽스처는 실제 ancestor 프로세스·MCP·watch를 실행하고 문서화된 registry·훅 변경을 재현합니다. `/clear`·`/resume`, 이전 환경 변수, 도구 재호출 없이 등록, 사용하지 않은 세션에서 떠나기와 사용한 세션에 다시 참여, 자동 이름 복구, pause·메일·lease 격리, 명시 세션 고정, 실패 시 rollback을 확인합니다. 모든 호스트·제공자가 Monitor를 제공한다는 증거는 아닙니다.
 
 `test:native-global-setup`은 현재 소스를 의존성 없는 임시 체크아웃에 복사하고 빈 HOME에서 실제 `setup all`과 일반 사용자 플러그인 CLI를 실행합니다. 설정 범위·SQLite·반복 설치를 확인한 뒤 `setup --uninstall all`을 실행합니다. 외부 모델을 호출하거나 실제 사용자 설정을 바꾸지 않습니다.
 

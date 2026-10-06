@@ -118,6 +118,9 @@ export class Store {
             client_message_id TEXT NOT NULL UNIQUE, queue_id TEXT,
             message_ids TEXT NOT NULL, input TEXT NOT NULL, created_at INTEGER NOT NULL
           );
+          CREATE TABLE IF NOT EXISTS used_sessions (
+            kind TEXT NOT NULL, session_id TEXT NOT NULL, used_at INTEGER NOT NULL, PRIMARY KEY(kind, session_id)
+          );
           INSERT OR IGNORE INTO agent_bindings SELECT name,'legacy','legacy' FROM agents;
           PRAGMA user_version=2;
         `);
@@ -280,6 +283,16 @@ export class Store {
   hostSession(kind: string, pid: number) {
     const row=this.get<{host_start:string|null;session_id:string;cwd:string;updated_at:number}>("SELECT * FROM sessions WHERE kind=? AND host_pid=?",kind,pid);
     return row && isProcessAlive(pid,row.host_start) ? row : undefined;
+  }
+
+  // Only a PeerLetter tool call records use. Automatic joins are reserved for used host sessions.
+  recordUse(kind: string, session: string): void {
+    validSession(session);
+    this.run("INSERT OR IGNORE INTO used_sessions VALUES(?,?,?)", kind, session, Date.now());
+  }
+
+  usedSession(kind: string, session: string): boolean {
+    return !!this.get("SELECT 1 FROM used_sessions WHERE kind=? AND session_id=?", kind, session);
   }
 
   agentForSession(session: string, kind?: string): Agent | undefined {

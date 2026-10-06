@@ -28,29 +28,35 @@ async function host(t:test.TestContext,pin=false) {
   return {store,session,ready,command,notices};
 }
 
-test("same Claude process follows /clear and /resume without tool calls; monitor, names, pause and leases stay isolated",{timeout:25000},async t=>{
+test("same Claude process leaves sessions that never used PeerLetter and rejoins used ones without tool calls; monitor, names, pause and leases stay isolated",{timeout:30000},async t=>{
   const {store,session,ready,command,notices}=await host(t);
-  const first=store.agent(ready.ready.name)!;
+  const first=store.agent(ready.ready.name)!;assert.equal(store.usedSession("claude",session),true);
   const sender=store.register({name:"sender",kind:"pi",session_id:randomUUID()});
   const lease=store.leaseClaim(first,["old/**"]);store.pause(session,"manual");
   const old=store.send(sender,{to:first.name,text:"OLD-PRIVATE",idempotency_key:"old"}).message;
   await until(()=>store.watchStatus(session).online);
   const next=randomUUID();await command({transition:next,registry:false}); // Hook beats stale registry/environment.
-  await until(()=>!!store.agentForSession(next,"claude") && store.watchStatus(next).online);
-  const second=store.agentForSession(next,"claude")!;
-  assert.notEqual(second.name,first.name);assert.equal(store.agent(first.name)!.online,0);
-  assert.equal(store.peek(second).messages.length,0);assert.equal(store.gate(session).pause_reason,"manual");
-  assert.ok(!store.leaseList().some(l=>l.id === lease.id));assert.equal(store.watchStatus(session).online,false);
-  const fresh=store.send(sender,{to:second.name,text:"NEW-PRIVATE",idempotency_key:"new"}).message;
+  await until(()=>store.agent(first.name)!.online === 0 && store.watchStatus(next).online);
+  assert.equal(store.agentForSession(next,"claude"),undefined,"A session that never used PeerLetter must not join automatically");
+  assert.ok(!store.leaseList().some(l=>l.id === lease.id));assert.equal(store.gate(session).pause_reason,"manual");
+  assert.equal(store.watchStatus(session).online,false);
+  const joined=(await command({who:true})).who; // Its first tool call joins with a separate automatic mailbox.
+  assert.equal(joined.session_id,next);assert.notEqual(joined.name,first.name);assert.equal(joined.registration.mode,"tool-call");
+  assert.equal(store.peek(store.agent(joined.name)!).messages.length,0);assert.equal(store.usedSession("claude",next),true);
+  const fresh=store.send(sender,{to:joined.name,text:"NEW-PRIVATE",idempotency_key:"new"}).message;
   await until(()=>store.status(sender,fresh.id).state === "notified");assert.equal(notices.length,1);assert.ok(!notices[0].includes("PRIVATE"));
   await command({transition:session});await until(()=>store.agentForSession(session,"claude")?.name === first.name && store.watchStatus(session).online);
+  assert.equal(store.agent(joined.name)!.online,0);
   assert.equal(store.gate(session).pause_reason,"manual");assert.equal(store.status(sender,old.id).state,"accepted");
   store.pause(session,null);await until(()=>store.status(sender,old.id).state === "notified");
   assert.equal(store.status(sender,old.id).acknowledged_at,null);assert.equal(notices.length,2);
   const third=randomUUID();await command({transition:third,hook:false,end:false}); // New registry beats a stale hook mapping too.
-  await until(()=>!!store.agentForSession(third,"claude") && store.watchStatus(third).online);
-  assert.notEqual(store.agentForSession(third,"claude")!.name,first.name);
-  assert.equal((await command({who:true})).who.session_id,third);
+  await until(()=>store.agent(first.name)!.online === 0);await delay(900);
+  assert.equal(store.agentForSession(third,"claude"),undefined);assert.equal(store.usedSession("claude",third),false);
+  await command({transition:session}); // Without a participant, resuming a used session rejoins it.
+  await until(()=>store.agentForSession(session,"claude")?.name === first.name && store.watchStatus(session).online);
+  const who=(await command({who:true})).who;
+  assert.equal(who.session_id,session);assert.equal(who.name,first.name);assert.equal(who.registration.mode,"startup");
 });
 
 test("explicit Claude --session stays pinned across the host's transition",{timeout:15000},async t=>{
