@@ -19,7 +19,7 @@ git clone https://github.com/crazylulu-c2sh/PeerLetter.git ~/dev/PeerLetter
 
 `setup`은 PATH와 일반적인 nvm 설치에서 Node **24.18 이상**을 찾아 실제 절대 경로를 고정합니다. **pnpm 10 이상 또는 Corepack**으로(pnpm이 `packageManager` 버전으로 알아서 전환합니다) `--frozen-lockfile --ignore-scripts` 설치를 수행합니다. 빌드나 의존성 빌드 승인은 필요 없습니다. Node·pnpm이 없으면 설치 방법을 출력하고 종료합니다. `PEERLETTER_NODE=/absolute/path/to/node`로 Node를 직접 고를 수도 있습니다. Bash가 필요합니다. 설치된 체크아웃 경로를 유지하고, 경로나 Node 설치가 바뀌면 setup을 다시 실행하세요.
 
-사용자의 **모든 프로젝트에서** 쓸 깨우기와 PeerLetter skill을 설치합니다. 설치 확인, 작업 공간 SQLite `doctor` 결과, 비공개 백업 경로, 현재 디렉토리의 기존 프로젝트 설정 충돌, 호스트에서 마칠 단계를 출력합니다. 관계없는 설정은 보존합니다. Claude에는 비공개 디렉토리 카탈로그를 쓰며, 업로드나 배포는 하지 않습니다.
+사용자의 **모든 프로젝트에서** 쓸 깨우기와 PeerLetter skill을 설치합니다. 설치 확인, 작업 공간 SQLite `doctor` 결과, 비공개 백업 경로, 현재 디렉토리의 기존 프로젝트 설정 충돌, 호스트에서 마칠 단계를 읽기 쉬운 보고서로 출력합니다. `--json`을 붙이면 전체 결과를 stdout에 JSON으로 출력하고, 진행 메시지는 stderr로 보냅니다. 관계없는 설정은 보존합니다. Claude에는 비공개 디렉토리 카탈로그를 쓰며, 업로드나 배포는 하지 않습니다.
 
 | 호스트 | 사용자 설정 | 기본 깨우기 | 호스트에서 마칠 단계 |
 |---|---|---|---|
@@ -45,6 +45,17 @@ skill은 **whoami → peers**를 호출하고 실제 이름·참가자·세션 �
 ```
 
 삭제는 소유한 MCP·훅·확장·skill 항목과 사용자 Claude 플러그인·카탈로그를 제거하며, 나중에 추가한 다른 설정은 보존합니다. 실행 중인 Claude monitor는 먼저 멈춥니다. 이미 떠 있는 MCP 연결은 호스트를 다시 불러오거나 재시작해 끊으세요. 백업은 비공개로 남습니다. 편집된 생성 파일은 보존하고 보고하며, 관리 중인 Codex 블록을 편집했다면 삭제 전에 검토해야 합니다. 과거 전체 설정으로 나중의 사용자 변경을 덮어쓰지 않습니다. 설치·삭제는 작업 공간 DB의 메일이나 lease를 삭제하지 않습니다.
+
+### 업데이트
+
+```bash
+~/dev/PeerLetter/setup update               # --preview는 들어올 커밋과 변경 계획만 보여 줍니다
+```
+
+`setup update`는 이 체크아웃을 upstream 브랜치로 fast-forward하고, 고정된 lockfile로 의존성을 설치한 뒤, 설치 기록에 있는 모든 agent를 갱신합니다. 생성된 Claude 플러그인과 skill 사본, Codex·Pi 항목, 고정된 Node 경로가 대상입니다. 나머지 과정은 갱신된 setup 스크립트가 이어서 실행합니다.
+- 추적 중인 파일에 로컬 변경이 있거나, 브랜치에 upstream이 없거나, upstream에 없는 커밋이 있으면 아무것도 바꾸지 않고 멈춥니다.
+- 끝나면 Claude를 재시작하고(플러그인 다시 불러오기로는 실행 중인 MCP가 바뀌지 않습니다), Codex MCP를 다시 연결하거나 새 세션을 열고, Pi는 `/reload`하세요.
+- 프로젝트 로컬 설치는 갱신하지 않습니다. 그 경우 `scripts/install.ts --project DIR --apply`를 다시 실행하세요.
 
 ### 체크아웃 검증·개발
 
@@ -550,7 +561,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 | `pnpm run test:native-codex` | 설치된 Codex | 격리 설정에서 실제 `codex exec`를 가짜 Responses 제공자로 실행하고, MCP 환경에서 `CODEX_THREAD_ID`를 뺀 상태로 기본 메타데이터가 Codex가 내보내는 것과 같은 thread ID로 연결되는지 |
 | `pnpm run test:native-codex-queue` | 설치된 Codex, Python 3, Unix PTY | 격리된 앱서버와 실제 대화형 TUI를 가짜 Responses 제공자로 띄워, 바쁜 턴에서 받고 ACK한 여러 메일은 추가 턴 0건, 읽지 않은 메일은 턴이 끝난 뒤 1회, 쉬는 상태 메일은 1회 깨우는지 |
 | `pnpm run test:native-pi` | 설치된 Pi 0.99.2 SDK·CLI | 격리된 전역 설치·RPC·가짜 chat 제공자로 프로젝트 신뢰 없이, 새 세션이 첫 도구 호출 전에는 참여하지 않고 이후 idle 메일 깨우기 1회 |
-| `pnpm run test:native-global-setup` | 설치된 Claude Code, pnpm 다운로드를 위한 네트워크 | 빈 HOME·의존성 없는 임시 체크아웃에서 실제 `setup all`, 사용자 플러그인 범위와 SQLite 확인 후 전체 삭제 |
+| `pnpm run test:native-global-setup` | 설치된 Claude Code, pnpm 다운로드를 위한 네트워크 | 빈 HOME·의존성 없는 임시 체크아웃에서 실제 `setup all`, 사용자 플러그인 범위·SQLite·읽기 쉬운 보고서 확인, 로컬 bare remote에서 `setup update`로 갱신한 뒤 전체 삭제 |
 | `pnpm run test:native-claude` | 설치된 Claude Code, Python 3, Unix PTY | 임시 프로젝트에 **async-rewake**를 설치하고 "사용함"으로 기록한 세션을 띄워, 도구 호출 없이 참여하고 메일만으로 본문 없는 알림이 담긴 다음 대화형 모델 턴이 시작되는지 |
 
 - **공통:**
@@ -573,8 +584,8 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 
 임시 HOME에서 세 호스트 설치, 다른 설정과 이후 변경 보존, 다른 설정·수정된 관리 블록 거부, 프로젝트 신뢰 없이 실제 Pi 사용자 확장·skill 로드, 호출한 Codex thread의 Git 루트 선택을 검증합니다. Claude 전환 픽스처는 실제 ancestor 프로세스·MCP·watch를 실행하고 문서화된 registry·훅 변경을 재현합니다. `/clear`·`/resume`, 이전 환경 변수, 도구 재호출 없이 등록, 사용하지 않은 세션에서 떠나기와 사용한 세션에 다시 참여, 자동 이름 복구, pause·메일·lease 격리, 명시 세션 고정, 실패 시 rollback을 확인합니다. 모든 호스트·제공자가 Monitor를 제공한다는 증거는 아닙니다.
 
-`test:native-global-setup`은 현재 소스를 의존성 없는 임시 체크아웃에 복사하고 빈 HOME에서 실제 `setup all`과 일반 사용자 플러그인 CLI를 실행합니다. 설정 범위·SQLite·반복 설치를 확인한 뒤 `setup --uninstall all`을 실행합니다. 외부 모델을 호출하거나 실제 사용자 설정을 바꾸지 않습니다.
+`test:native-global-setup`은 현재 소스를 의존성 없는 임시 체크아웃에 복사하고 빈 HOME에서 실제 `setup all`과 일반 사용자 플러그인 CLI를 실행합니다. 설정 범위·SQLite·읽기 쉬운 보고서·반복 설치를 확인하고, 로컬 bare remote에서 `setup update`로 체크아웃을 fast-forward해 갱신된 skill 사본을 확인한 뒤 `setup --uninstall all`을 실행합니다. 외부 모델을 호출하거나 실제 사용자 설정을 바꾸지 않습니다.
 
 ## 업데이트
 
-`git pull --ff-only`와 `pnpm install --frozen-lockfile --ignore-scripts`로 체크아웃을 업데이트한 뒤, `setup <설치한-agent>`를 다시 실행해 생성된 플러그인·skill 파일을 갱신한 뒤 클라이언트를 다시 연결하거나 재시작하세요. Claude MCP 런타임 코드가 바뀌었다면 Claude를 재시작하세요. 버전 올리기, 레지스트리 업로드, 마켓플레이스 배포는 필요 없습니다.
+`setup update`로 업데이트한 뒤([업데이트](#업데이트) 참고) 클라이언트를 다시 연결하거나 재시작하세요. Claude MCP 런타임 코드가 바뀌었다면 Claude를 재시작하세요. 버전 올리기, 레지스트리 업로드, 마켓플레이스 배포는 필요 없습니다.

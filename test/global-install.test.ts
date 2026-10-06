@@ -5,8 +5,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { globalInstallation, applyGlobal, uninstallPlan } from "../scripts/global-install.ts";
+import { appliedReport, planReport } from "../scripts/setup-report.ts";
 import { codexDaemon } from "./codex-fixture.ts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -45,6 +46,87 @@ test("fresh HOME all-client global plan pins Node, installs wake/skills and unin
   assert.equal(read(path.join(home,".claude/peerletter.json")).wake,"none");
   assert.ok(!fs.existsSync(path.join(home,".agents/skills/peerletter")));
   assert.equal(uninstallPlan(options).removed.length,0);
+});
+
+test("installed selects only recorded agents and reports when nothing is installed",t=>{
+  const {home}=fixture(t);
+  assert.deepEqual(Object.keys(globalInstallation({home,client:"installed"}).entries),[]);
+  const empty=applyGlobal({home,client:"installed"},false,stub);
+  assert.deepEqual(empty.installed,[]);assert.match(String(empty.next),/setup claude\|codex\|pi\|all/);
+  assert.equal(fs.existsSync(path.join(home,".local/state/peerletter/installation.json")),false);
+  applyGlobal({home,client:"codex"},false,stub);
+  assert.deepEqual(Object.keys(globalInstallation({home,client:"installed"}).entries),["codex"]);
+  assert.deepEqual(applyGlobal({home,client:"installed"},false,stub).installed,["codex"]);
+  assert.deepEqual(uninstallPlan({home,client:"installed"}).removed,["codex"]);
+});
+
+test("setup update fast-forwards, finishes with the updated setup and refuses unsafe checkouts unchanged",{timeout:30000},t=>{
+  const {root,home}=fixture(t),remote=path.join(root,"remote.git"),checkout=path.join(root,"checkout"),other=path.join(root,"other");
+  const git=(cwd:string,...args:string[])=>execFileSync("git",["-c","user.name=fixture","-c","user.email=fixture@example.invalid",...args],
+    {cwd,encoding:"utf8",stdio:["ignore","pipe","pipe"]}).trim();
+  const env:NodeJS.ProcessEnv={...process.env,HOME:home,CODEX_HOME:path.join(home,".codex"),CLAUDE_CONFIG_DIR:path.join(home,".claude"),
+    PI_CODING_AGENT_DIR:path.join(home,".pi/agent"),XDG_STATE_HOME:path.join(home,".local/state"),PEERLETTER_NODE:process.execPath};
+  delete env.PEERLETTER_SETUP_PULLED;
+  const setup=(dir:string,...args:string[])=>spawnSync(path.join(dir,"setup"),args,{cwd:root,env,encoding:"utf8"});
+  git(root,"init","-q","--bare","-b","main",remote);git(root,"clone","-q",remote,checkout);
+  fs.copyFileSync(path.join(repo,"setup"),path.join(checkout,"setup"));
+  for (const dir of ["scripts","src"]) fs.cpSync(path.join(repo,dir),path.join(checkout,dir),{recursive:true});
+  git(checkout,"add","-A");git(checkout,"commit","-qm","initial");git(checkout,"push","-q","-u","origin","HEAD");
+  const initial=git(checkout,"rev-parse","HEAD");
+
+  const current=setup(checkout,"update","--preview","--json");assert.equal(current.status,0,current.stderr);
+  assert.match(current.stderr,/up to date/);assert.deepEqual(JSON.parse(current.stdout).entries,{},"--json keeps stdout pure JSON");
+  const readable=setup(checkout,"update","--preview");assert.equal(readable.status,0,readable.stderr);
+  assert.match(readable.stdout,/up to date/);assert.match(readable.stdout,/Nothing is installed for your user/);
+
+  // Upstream replaces setup with a stub, so the run after the merge proves which script finishes.
+  git(root,"clone","-q",remote,other);
+  fs.writeFileSync(path.join(other,"setup"),'#!/usr/bin/env bash\nprintf "updated setup: %s %s\\n" "$*" "${PEERLETTER_SETUP_PULLED:-}"\n');
+  git(other,"commit","-qam","Upstream change");git(other,"push","-q");
+  const upstream=git(other,"rev-parse","HEAD");
+
+  fs.appendFileSync(path.join(checkout,"src/errors.ts"),"// local edit\n");
+  const dirty=setup(checkout,"update");assert.equal(dirty.status,1);assert.match(dirty.stderr,/local changes/);
+  git(checkout,"checkout","--","src/errors.ts");
+  git(checkout,"switch","-q","-c","local");
+  const unpublished=setup(checkout,"update");assert.equal(unpublished.status,1);assert.match(unpublished.stderr,/no upstream/);
+  git(checkout,"switch","-q","main");
+  fs.writeFileSync(path.join(checkout,"local.txt"),"local\n");git(checkout,"add","local.txt");git(checkout,"commit","-qm","Local change");
+  const ahead=setup(checkout,"update");assert.equal(ahead.status,1);assert.match(ahead.stderr,/not on origin\/main/);
+  git(checkout,"reset","-q","--hard",initial);
+  assert.equal(git(checkout,"rev-parse","HEAD"),initial,"Refusals must not move the checkout");
+
+  const preview=setup(checkout,"update","--preview");assert.equal(preview.status,0,preview.stderr);
+  assert.match(preview.stdout,/would update/);assert.match(preview.stdout,/Upstream change/);
+  assert.equal(git(checkout,"rev-parse","HEAD"),initial);
+
+  const updated=setup(checkout,"update");assert.equal(updated.status,0,updated.stderr);
+  assert.equal(git(checkout,"rev-parse","HEAD"),upstream);
+  assert.match(updated.stdout,/updated [0-9a-f]+ -> [0-9a-f]+/);assert.match(updated.stdout,/updated setup: update 1/);
+
+  const plain=path.join(root,"plain");fs.mkdirSync(plain);fs.copyFileSync(path.join(repo,"setup"),path.join(plain,"setup"));
+  const notClone=setup(plain,"update");assert.equal(notClone.status,1);assert.match(notClone.stderr,/git clone/);
+  assert.equal(setup(plain,"--uninstall","update").status,1);
+});
+
+test("setup prints readable install, preview, refresh and uninstall reports",t=>{
+  const {home}=fixture(t),previous=process.env.HOME;process.env.HOME=home;
+  t.after(()=>{process.env.HOME=previous;});
+  const preview=planReport(globalInstallation({home}));
+  assert.match(preview,/^setup would install: Claude, Codex, Pi \(preview: nothing has been changed\)$/m);
+  assert.match(preview,/^  create {4}~\/\.codex\/config\.toml$/m);assert.match(preview,/^  run {7}claude plugin install peerletter@/m);
+  const installed=appliedReport(applyGlobal({home},false,stub));
+  assert.match(installed,/^PeerLetter installed: Claude, Codex, Pi$/m);
+  assert.match(installed,/^  ok {8}Codex: settings, generated files and skill are in place\.$/m);
+  assert.match(installed,/^  ok {8}Workspace database integrity: ok\n {12}project {3}.+\n {12}database {2}.+peerletter\.db$/m);
+  assert.match(installed,/^Backups \(private copies of files that changed\)$/m);
+  assert.match(installed,/^Next$/m);assert.match(installed,/^  Claude {4}Approve the local plugin/m);
+  assert.match(planReport(globalInstallation({home})),/^  unchanged ~\/\.codex\/config\.toml$/m);
+  assert.match(planReport(globalInstallation({home,client:"installed"}),"installed"),/^setup update would refresh: Claude, Codex, Pi/);
+  assert.match(appliedReport(applyGlobal({home,client:"installed"},false,stub),true),/^PeerLetter refreshed: Claude, Codex, Pi$/m);
+  assert.match(planReport(uninstallPlan({home})),/^setup --uninstall would remove: Claude, Codex, Pi/);
+  assert.match(appliedReport(applyGlobal({home},true,stub)),/^PeerLetter removed: Claude, Codex, Pi$/m);
+  assert.match(appliedReport(applyGlobal({home},true,stub)),/^Nothing to remove/);
 });
 
 test("global installer rejects foreign config and modified owned Codex blocks before mutation",t=>{

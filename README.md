@@ -17,7 +17,7 @@ git clone https://github.com/crazylulu-c2sh/PeerLetter.git ~/dev/PeerLetter
 
 `setup` finds Node **24.18+** on PATH or in the usual nvm installation, pins its real absolute executable, and installs dependencies with **pnpm 10+ / Corepack** (pnpm switches itself to the `packageManager` version), `--frozen-lockfile --ignore-scripts`. No build or dependency build approval is needed. If Node/pnpm is missing, it prints the required installation step and exits. Set `PEERLETTER_NODE=/absolute/path/to/node` to choose Node explicitly. Bash is required. Keep this checkout at the installed path; rerun setup after changing it or the Node installation.
 
-Setup configures automatic wake and the PeerLetter skill **for your user across projects**. It prints installation checks, a workspace SQLite `doctor` result, private backup paths, possible project conflicts, and remaining host steps. Other settings remain intact. It uses a private directory catalog for Claude; nothing is uploaded or published.
+Setup configures automatic wake and the PeerLetter skill **for your user across projects**. It prints a readable report: installation checks, a workspace SQLite `doctor` result, private backup paths, possible project conflicts, and remaining host steps. Add `--json` for the full machine-readable result on stdout; progress then goes to stderr. Other settings remain intact. It uses a private directory catalog for Claude; nothing is uploaded or published.
 
 | Host | User configuration | Default wake | Finish in the host |
 |---|---|---|---|
@@ -43,6 +43,14 @@ Old project-local PeerLetter entries can override or compete with user entries. 
 ```
 
 Uninstall removes owned MCP/hooks/extension/skill entries and the user Claude plugin/catalog, preserving settings added later. It silences a running Claude monitor first; restart/reload the host afterward to disconnect an already running MCP. Backups remain private. Edited generated files are retained and reported; an edited managed Codex block must be reviewed before uninstall. The installer never restores an old full config over later user edits. Installation/uninstall does not delete mail or leases from the workspace DB.
+
+### Update
+
+```bash
+~/dev/PeerLetter/setup update                # --preview lists incoming commits and the plan only
+```
+
+`setup update` fast-forwards this checkout to its upstream branch, installs dependencies from the frozen lockfile and refreshes every agent recorded in the installation manifest: the generated Claude plugin and skill copy, Codex and Pi entries, and the pinned Node. The updated setup script finishes the run. Nothing is changed if tracked files have local edits, the branch has no upstream, or the checkout has commits that are not upstream. Afterwards restart Claude (plugin reload does not respawn a running MCP), reconnect Codex MCP or start a new session, and `/reload` Pi. Project-local installs are not refreshed; rerun `scripts/install.ts --project DIR --apply` for them.
 
 ### Verify or develop the checkout
 
@@ -329,6 +337,6 @@ Global setup tests use temporary HOME settings for all hosts, preserve unrelated
 
 `pnpm run test:native-pi` starts the installed Pi 0.99.2 CLI in RPC mode with an isolated user installation, loopback chat provider and untrusted project resources. It verifies that a new session does not join before its first PeerLetter tool call, then one native idle wake with no body injection or ACK. It uses no external model; CI runs this test.
 
-`pnpm run test:native-global-setup` additionally requires installed Claude Code and network access for pnpm. It copies the current sources into a fresh dependency-free checkout, uses an empty HOME, runs the actual `setup all` and normal user plugin CLI, checks SQLite, installation scope and repeated installation, then runs `setup --uninstall all`. It makes no external model calls and changes no production settings.
+`pnpm run test:native-global-setup` additionally requires installed Claude Code and network access for pnpm. It copies the current sources into a fresh dependency-free checkout, uses an empty HOME, runs the actual `setup all` and normal user plugin CLI, checks SQLite, installation scope, the readable report and repeated installation, fast-forwards the checkout from a local bare remote with `setup update` and checks the refreshed skill copy, then runs `setup --uninstall all`. It makes no external model calls and changes no production settings.
 
-Update the checkout with `git pull --ff-only` and `pnpm install --frozen-lockfile --ignore-scripts`, rerun `setup <installed-agent>` to refresh generated plugin/skill files, then reconnect/restart its clients; restart Claude when MCP runtime code changed. No version bump, registry upload or marketplace publication is needed.
+Update with `setup update` (see [Update](#update)), then reconnect/restart the clients; restart Claude when MCP runtime code changed. No version bump, registry upload or marketplace publication is needed.
