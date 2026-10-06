@@ -1,14 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 checkout=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-usage() { printf '%s\n' 'Usage: setup claude|codex|pi|all [--preview]' '       setup --uninstall claude|codex|pi|all' 'Installs user settings with automatic wake. Existing unrelated settings are preserved.'; }
+usage() { printf '%s\n' 'Usage: setup claude|codex|pi|all [--preview] [--json]' '       setup update [--preview] [--json]' '       setup --uninstall claude|codex|pi|all [--preview] [--json]' 'Installs user settings with automatic wake. Existing unrelated settings are preserved.' 'update fast-forwards this checkout and refreshes every installed agent.' '--json prints the full result as JSON on stdout; progress goes to stderr.'; }
 if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then usage; exit 0; fi
-uninstall=false
+uninstall=false update=false
 if [[ $1 == --uninstall ]]; then uninstall=true; shift; fi
-case ${1:-} in claude|codex|pi|all) client=$1; shift;; *) usage >&2; exit 1;; esac
-preview=false
-if [[ ${1:-} == --preview ]]; then preview=true; shift; fi
-if [[ $# != 0 ]]; then usage >&2; exit 1; fi
+case ${1:-} in
+  claude|codex|pi|all) client=$1; shift;;
+  update) if $uninstall; then usage >&2; exit 1; fi; client=installed update=true; shift;;
+  *) usage >&2; exit 1;;
+esac
+preview=false json=false
+for option; do case $option in --preview) preview=true;; --json) json=true;; *) usage >&2; exit 1;; esac; done
+fail() { printf '%s\n' "$@" >&2; exit 1; }
+# Progress (git, pnpm) goes to fd 3: stdout normally, stderr when stdout must stay pure JSON.
+if $json; then exec 3>&2; else exec 3>&1; fi
+if $update && [[ -z ${PEERLETTER_SETUP_PULLED:-} ]]; then
+  repo() { git -C "$checkout" "$@"; }
+  repo rev-parse --git-dir >/dev/null 2>&1 || fail "setup update needs the git clone at $checkout."
+  [[ -z $(repo status --porcelain --untracked-files=no) ]] || fail "$checkout has local changes. Commit or stash them, then rerun setup update."
+  repo rev-parse --verify --quiet '@{upstream}' >/dev/null || fail "The checked-out branch has no upstream. Check out main, then rerun setup update."
+  repo fetch --quiet || fail 'Fetching the upstream branch failed; nothing was changed.'
+  before=$(repo rev-parse --short HEAD) after=$(repo rev-parse --short '@{upstream}')
+  repo merge-base --is-ancestor HEAD '@{upstream}' || fail "This checkout has commits that are not on $(repo rev-parse --abbrev-ref '@{upstream}'). Reconcile them, then rerun setup update."
+  if [[ $before == "$after" ]]; then printf 'PeerLetter is up to date at %s.\n' "$before" >&3
+  elif $preview; then { printf 'PeerLetter would update %s -> %s:\n' "$before" "$after"; repo log --oneline 'HEAD..@{upstream}'; } >&3
+  else
+    repo merge --ff-only --quiet '@{upstream}'
+    printf 'PeerLetter updated %s -> %s.\n' "$before" "$after" >&3
+    # Finish with the updated setup script, which may install differently.
+    export PEERLETTER_SETUP_PULLED=1
+    if $json; then exec "$checkout/setup" update --json; else exec "$checkout/setup" update; fi
+  fi
+fi
 compatible() { "$1" -e 'const [a,b,c]=process.versions.node.split(".").map(Number);process.exit(a>24 || a===24 && (b>18 || b===18 && c>=0) ? 0:1)' >/dev/null 2>&1; }
 selected_node=''
 if [[ -n ${PEERLETTER_NODE:-} ]]; then
@@ -33,9 +57,10 @@ if ! $uninstall && ! $preview; then
   if command -v pnpm >/dev/null && [[ $(pnpm --version 2>/dev/null) =~ ^([0-9]+)\. ]] && (( BASH_REMATCH[1] >= 10 )); then package_command=(pnpm)
   elif command -v corepack >/dev/null; then package_command=(corepack pnpm)
   else printf 'Install pnpm 10+ or Corepack, then rerun setup.\n' >&2; exit 1; fi
-  (cd -- "$checkout"; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; "${package_command[@]}" install --frozen-lockfile --ignore-scripts)
+  (cd -- "$checkout"; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; "${package_command[@]}" install --frozen-lockfile --ignore-scripts) >&3
 fi
 arguments=(--client "$client" --node "$selected_node")
 if $uninstall; then arguments+=(--uninstall); fi
 if $preview; then arguments+=(--preview); fi
+if $json; then arguments+=(--json); fi
 exec "$selected_node" "$checkout/scripts/global-install.ts" "${arguments[@]}"

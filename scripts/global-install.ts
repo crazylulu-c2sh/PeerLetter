@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { readJson, mergeHooks, mergeToml, quoteShell, writeWithBackup } from "./install.ts";
 import { MailError, errorResult } from "../src/errors.ts";
+import { appliedReport, planReport } from "./setup-report.ts";
 
 const repo=fileURLToPath(new URL("../",import.meta.url));
 const json=(value:unknown)=>JSON.stringify(value,null,2)+"\n";
@@ -28,7 +29,9 @@ function roots(o:GlobalOptions) {
     pi:o.piHome || (!o.home && process.env.PI_CODING_AGENT_DIR) || path.join(home,".pi/agent"),
     state:o.stateHome || (!o.home && process.env.XDG_STATE_HOME) || path.join(home,".local/state")};
 }
-function clients(client="all"):Client[] {
+// "installed" selects the agents recorded in the installation manifest, for setup update.
+function clients(client="all",recorded:Record<string,unknown>={}):Client[] {
+  if (client === "installed") return (["codex","claude","pi"] as Client[]).filter(kind=>recorded[kind]);
   if (client === "all") return ["codex","claude","pi"];
   if (!["codex","claude","pi"].includes(client)) throw new MailError("INVALID_ARGUMENT","Choose claude, codex, pi or all.");
   return [client as Client];
@@ -62,7 +65,7 @@ export function globalInstallation(o:GlobalOptions={}) {
   const manifest=path.join(r.state,"peerletter/installation.json"),previous=readJson(manifest);
   if (previous.version !== undefined && previous.version !== 1) throw new MailError("INVALID_CONFIG","Unknown installation manifest version.");
   const entries:Partial<Record<Client,RecordEntry>>={};
-  for (const kind of clients(o.client)) {
+  for (const kind of clients(o.client,previous.clients)) {
     const old=previous.clients?.[kind] as RecordEntry|undefined;
     if (old && old.checkout !== checkout) throw new MailError("CONFIG_EXISTS",`Uninstall ${kind} from ${old.checkout} before switching checkouts.`);
     const expectedConfig=kind === "codex" ? path.join(r.codex,"config.toml") : kind === "pi" ? path.join(r.pi,"settings.json") : path.join(r.claude,"peerletter.json");
@@ -119,7 +122,7 @@ export function uninstallPlan(o:GlobalOptions={}) {
   const r=roots(o),manifest=path.join(r.state,"peerletter/installation.json"),previous=readJson(manifest);
   if (previous.version !== undefined && previous.version !== 1) throw new MailError("INVALID_CONFIG","Unknown installation manifest version.");
   const writes:Write[]=[],remove:string[]=[],commands:Command[]=[],removed:Client[]=[],retained:string[]=[];
-  for (const kind of clients(o.client)) {
+  for (const kind of clients(o.client,previous.clients)) {
     const entry=previous.clients?.[kind] as RecordEntry|undefined;
     if (!entry) continue;
     if (kind === "codex") {
@@ -162,8 +165,11 @@ export function localConflicts(cwd:string) {
   return [".codex/config.toml",".codex/hooks.json",".mcp.json",".claude/settings.local.json",".claude/peerletter.json",".pi/mcp.json",".pi/settings.json"]
     .map(f=>path.join(cwd,f)).filter(f=>fs.existsSync(f) && /peerletter/i.test(fs.readFileSync(f,"utf8")));
 }
-export function applyGlobal(o:GlobalOptions={},uninstall=false,run:(c:Command)=>unknown=(c)=>execFileSync(c.command,c.args,{encoding:"utf8",stdio:c.args[0] === "--version" ? "pipe" : "inherit",timeout:30000})) {
+// Host CLI progress goes to stderr, so stdout carries only the setup result.
+export function applyGlobal(o:GlobalOptions={},uninstall=false,run:(c:Command)=>unknown=(c)=>execFileSync(c.command,c.args,{encoding:"utf8",stdio:c.args[0] === "--version" ? "pipe" : ["inherit",2,2],timeout:30000})) {
   const plan=uninstall ? uninstallPlan(o) : globalInstallation(o);
+  if (!uninstall && !Object.keys((plan as ReturnType<typeof globalInstallation>).entries).length)
+    return {installed:[],next:"No user installation is recorded. Run setup claude|codex|pi|all. For a project-local install, rerun scripts/install.ts --project DIR --apply."};
   const commands=uninstall ? (plan as ReturnType<typeof uninstallPlan>).commands : Object.values((plan as ReturnType<typeof globalInstallation>).entries).flatMap(e=>e!.commands);
   if (commands.length) {
     const version=String(run({command:"claude",args:["--version"]}));
@@ -204,15 +210,26 @@ export function applyGlobal(o:GlobalOptions={},uninstall=false,run:(c:Command)=>
     files:e!.writes.every(w=>fs.existsSync(w.file) && fs.readFileSync(w.file,"utf8") === w.data),
     skills:e!.links.every(l=>fs.existsSync(l.file)),node:e!.node}));
   return {installed:Object.keys(p.entries),manifest:p.manifest,backups,doctor,workspace_doctor:workspaceDoctor,project_conflicts:localConflicts(process.cwd()),
-    next:{claude:"Approve the local plugin if prompted; /reload-plugins or restart for a first install. Restart Claude to load updates to an existing MCP runtime; plugin reload does not reliably respawn it. Ask Claude to use PeerLetter, then inspect whoami.wake_runner.online. Monitor requires an interactive supported provider. /resume and /clear follow the same live host session.",
+    next:{claude:"Approve the local plugin if prompted; /reload-plugins or restart for a first install. Restart Claude to load updates to an existing MCP runtime; plugin reload does not reliably respawn it. Ask Claude to use PeerLetter, then inspect whoami.wake_runner.online. Monitor requires an interactive supported provider. /resume of a session that used PeerLetter rejoins it; /clear waits for the first PeerLetter call.",
       codex:"Review /hooks. Reconnect MCP or start a new session, then ask Codex to use PeerLetter: its first whoami binds the actual thread and enables queue wake. /mcp only shows status; restart a shared daemon only when you intend to disconnect its clients.",
       pi:"/reload or restart. Global extensions/skills load before project trust; no project trust bypass is installed. Pi itself needs Node 24.18+. Ask Pi to use PeerLetter.",
       duplicates:"If project_conflicts is nonempty, remove or disable only your old PeerLetter project entries with backups before joining. Keep other settings. Global setup deliberately does not edit project files."}};
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const machine=process.argv.includes("--json");
   try {
-    const {values:v}=parseArgs({options:{client:{type:"string"},node:{type:"string"},preview:{type:"boolean"},uninstall:{type:"boolean"}}});
+    const {values:v}=parseArgs({options:{client:{type:"string"},node:{type:"string"},preview:{type:"boolean"},uninstall:{type:"boolean"},json:{type:"boolean"}}});
     const o={client:v.client,node:v.node};
-    console.log(json(v.preview ? (v.uninstall?uninstallPlan(o):globalInstallation(o)) : applyGlobal(o,!!v.uninstall)));
-  } catch(error) {console.error(json(errorResult(error)));process.exitCode=1;}
+    if (v.preview) {
+      const plan=v.uninstall ? uninstallPlan(o) : globalInstallation(o);
+      console.log(machine ? json(plan) : planReport(plan,o.client));
+    } else {
+      const result=applyGlobal(o,!!v.uninstall);
+      console.log(machine ? json(result) : appliedReport(result,o.client === "installed"));
+    }
+  } catch(error) {
+    const {error:detail}=errorResult(error);
+    console.error(machine ? json({error:detail}) : `PeerLetter setup failed: ${detail.message} (${detail.code})`);
+    process.exitCode=1;
+  }
 }
