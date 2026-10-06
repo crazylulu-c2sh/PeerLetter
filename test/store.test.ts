@@ -137,6 +137,20 @@ test("schema 1 migration preserves legacy mailboxes, messages and same-session n
   assert.equal(upgraded.status(sender,mail.id).state,"accepted");
 });
 
+test("a database from before used_sessions backfills host sessions that sent mail, once",t=>{
+  const {a,b,sender,receiver,project}=fixture(t);
+  const unbound=a.register({kind:"pi",session_id:`runtime:${randomUUID()}`});
+  a.send(sender,{to:"receiver",text:"old",idempotency_key:"old"});a.send(unbound,{to:"receiver",text:"old",idempotency_key:"old"});
+  a.run("DELETE FROM metadata WHERE key='used_sessions_backfill'");
+  const upgraded=new Store(project);t.after(()=>upgraded.close());
+  assert.equal(upgraded.usedSession("codex",sender.session_id),true);
+  assert.equal(upgraded.usedSession("claude",receiver.session_id),false,"Receiving alone does not prove a tool call");
+  assert.equal(upgraded.usedSession("pi",unbound.session_id),false,"Unbound runtime identities never join automatically");
+  b.run("DELETE FROM used_sessions");
+  const again=new Store(project);t.after(()=>again.close());
+  assert.equal(again.usedSession("codex",sender.session_id),false,"The backfill runs only once");
+});
+
 test("long polls leave the write lock free and accept cancellation",async t=>{
   const {a,b,sender,receiver} = fixture(t);
   const poll = b.receive(receiver,{wait_ms:2000});
