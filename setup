@@ -26,7 +26,7 @@ if $update && [[ -z ${PEERLETTER_SETUP_PULLED:-} ]]; then
   repo merge-base --is-ancestor HEAD '@{upstream}' || fail "This checkout has commits that are not on $(repo rev-parse --abbrev-ref '@{upstream}'). Reconcile them, then rerun setup update."
   if [[ $before == "$after" ]]; then printf 'PeerLetter is up to date at %s.\n' "$before" >&3
   else
-    { printf 'PeerLetter would update %s -> %s:\n' "$before" "$after"; repo log --oneline 'HEAD..@{upstream}'; } >&3
+    { printf 'PeerLetter would update %s -> %s:\n' "$before" "$after"; repo --no-pager log --oneline 'HEAD..@{upstream}'; } >&3
   fi
   if [[ $before != "$after" ]] && ! $preview; then
     # The pulled code then runs in every agent session's hooks, MCP and extension.

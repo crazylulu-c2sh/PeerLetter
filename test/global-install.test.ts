@@ -67,7 +67,8 @@ test("setup update fast-forwards, finishes with the updated setup and refuses un
   const env:NodeJS.ProcessEnv={...process.env,HOME:home,CODEX_HOME:path.join(home,".codex"),CLAUDE_CONFIG_DIR:path.join(home,".claude"),
     PI_CODING_AGENT_DIR:path.join(home,".pi/agent"),XDG_STATE_HOME:path.join(home,".local/state"),PEERLETTER_NODE:process.execPath};
   delete env.PEERLETTER_SETUP_PULLED;
-  const setup=(dir:string,...args:string[])=>spawnSync(path.join(dir,"setup"),args,{cwd:root,env,encoding:"utf8"});
+  // A hang (for example a pager waiting on a terminal) must fail this test, not stall CI.
+  const setup=(dir:string,...args:string[])=>spawnSync(path.join(dir,"setup"),args,{cwd:root,env,encoding:"utf8",timeout:20000});
   // Run setup on a pseudo-terminal and answer its confirmation question.
   const tty=String.raw`import os, pty, sys
 pid, fd = pty.fork()
@@ -84,7 +85,7 @@ while True:
 _, status = os.waitpid(pid, 0)
 sys.stdout.write(out.decode(errors="replace"))
 sys.exit(os.waitstatus_to_exitcode(status))`;
-  const terminal=(dir:string,answer:string,...args:string[])=>spawnSync("python3",["-c",tty,answer,path.join(dir,"setup"),...args],{cwd:root,env,encoding:"utf8"});
+  const terminal=(dir:string,answer:string,...args:string[])=>spawnSync("python3",["-c",tty,answer,path.join(dir,"setup"),...args],{cwd:root,env,encoding:"utf8",timeout:20000});
   git(root,"init","-q","--bare","-b","main",remote);git(root,"clone","-q",remote,checkout);
   fs.copyFileSync(path.join(repo,"setup"),path.join(checkout,"setup"));
   for (const dir of ["scripts","src"]) fs.cpSync(path.join(repo,dir),path.join(checkout,dir),{recursive:true});
