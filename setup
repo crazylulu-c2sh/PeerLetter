@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 checkout=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-usage() { printf '%s\n' 'Usage: setup claude|codex|pi|all [--preview] [--json]' '       setup update [--preview] [--json]' '       setup --uninstall claude|codex|pi|all [--preview] [--json]' 'Installs user settings with automatic wake. Existing unrelated settings are preserved.' 'update fast-forwards this checkout and refreshes every installed agent.' '--json prints the full result as JSON on stdout; progress goes to stderr.'; }
+usage() { printf '%s\n' 'Usage: setup claude|codex|pi|all [--preview] [--json]' '       setup update [--preview] [--yes] [--json]' '       setup --uninstall claude|codex|pi|all [--preview] [--json]' 'Installs user settings with automatic wake. Existing unrelated settings are preserved.' 'update fast-forwards this checkout after you confirm the incoming commits (--yes skips the question) and refreshes every installed agent.' '--json prints the full result as JSON on stdout; progress goes to stderr.'; }
 if [[ ${1:-} == --help || ${1:-} == -h || $# == 0 ]]; then usage; exit 0; fi
 uninstall=false update=false
 if [[ $1 == --uninstall ]]; then uninstall=true; shift; fi
@@ -10,8 +10,9 @@ case ${1:-} in
   update) if $uninstall; then usage >&2; exit 1; fi; client=installed update=true; shift;;
   *) usage >&2; exit 1;;
 esac
-preview=false json=false
-for option; do case $option in --preview) preview=true;; --json) json=true;; *) usage >&2; exit 1;; esac; done
+preview=false json=false yes=false
+for option; do case $option in --preview) preview=true;; --json) json=true;; --yes) yes=true;; *) usage >&2; exit 1;; esac; done
+if $yes && ! $update; then usage >&2; exit 1; fi
 fail() { printf '%s\n' "$@" >&2; exit 1; }
 # Progress (git, pnpm) goes to fd 3: stdout normally, stderr when stdout must stay pure JSON.
 if $json; then exec 3>&2; else exec 3>&1; fi
@@ -24,8 +25,17 @@ if $update && [[ -z ${PEERLETTER_SETUP_PULLED:-} ]]; then
   before=$(repo rev-parse --short HEAD) after=$(repo rev-parse --short '@{upstream}')
   repo merge-base --is-ancestor HEAD '@{upstream}' || fail "This checkout has commits that are not on $(repo rev-parse --abbrev-ref '@{upstream}'). Reconcile them, then rerun setup update."
   if [[ $before == "$after" ]]; then printf 'PeerLetter is up to date at %s.\n' "$before" >&3
-  elif $preview; then { printf 'PeerLetter would update %s -> %s:\n' "$before" "$after"; repo log --oneline 'HEAD..@{upstream}'; } >&3
   else
+    { printf 'PeerLetter would update %s -> %s:\n' "$before" "$after"; repo log --oneline 'HEAD..@{upstream}'; } >&3
+  fi
+  if [[ $before != "$after" ]] && ! $preview; then
+    # The pulled code then runs in every agent session's hooks, MCP and extension.
+    if ! $yes; then
+      [[ -t 0 ]] || fail 'setup update asks before applying new code. Review it with setup update --preview, then rerun in a terminal or pass --yes.'
+      printf 'Review the changes with: git -C %q log -p HEAD..@{upstream}\nApply this update? [y/N] ' "$checkout" >&2
+      read -r answer || answer=''
+      [[ $answer == [yY] || $answer == [yY][eE][sS] ]] || fail 'Update cancelled; nothing was changed.'
+    fi
     repo merge --ff-only --quiet '@{upstream}'
     printf 'PeerLetter updated %s -> %s.\n' "$before" "$after" >&3
     # Finish with the updated setup script, which may install differently.

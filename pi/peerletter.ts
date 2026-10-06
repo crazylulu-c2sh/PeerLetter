@@ -14,7 +14,6 @@ export default function peerletter(pi: ExtensionAPI, options: {node?:string} = {
   let context: ExtensionContext | undefined;
   let session = "";
   let timer: ReturnType<typeof setInterval> | undefined;
-  let unlisten: (()=>void) | undefined;
   let busy = false;
   let dialogs = 0;
   let compact = false;
@@ -58,6 +57,9 @@ export default function peerletter(pi: ExtensionAPI, options: {node?:string} = {
     busy = true;
     let actor: Agent | undefined;
     try {
+      // While the user's abort of the current run is settling, inject nothing; the settled
+      // "aborted" outcome then records the pause. No terminal input is observed.
+      if (context.signal?.aborted) return;
       actor = ownedActor();
       if (!actor) return;
       const baseline = process.env.PEERLETTER_WAKE_BACKLOG === "1" ? 0 : current.noticeBaseline(actor);
@@ -78,7 +80,6 @@ export default function peerletter(pi: ExtensionAPI, options: {node?:string} = {
     closed = true;
     if (timer) clearInterval(timer);
     timer = undefined;
-    unlisten?.(); unlisten = undefined;
     try {
       const actor = ownedActor();
       if (actor) store?.closeAgent(actor);
@@ -101,10 +102,6 @@ export default function peerletter(pi: ExtensionAPI, options: {node?:string} = {
       args: [fileURLToPath(new URL("../src/stdio.ts",import.meta.url)),"--project",ctx.cwd,"--kind","pi",
         "--session",session,"--wake","pi-extension", ...(process.env.PEERLETTER_NAME ? ["--name",process.env.PEERLETTER_NAME] : [])] });
     timer = setInterval(poll,750); timer.unref();
-    if (ctx.mode === "tui") unlisten = ctx.ui.onTerminalInput(data => {
-      if (data === "\u001b" && !ctx.isIdle()) pause("user_abort");
-      return undefined;
-    });
   });
   pi.on("session_shutdown",close);
   pi.on("input",event => { if (event.source !== "extension") pause(null); });

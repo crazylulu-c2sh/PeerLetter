@@ -46,7 +46,7 @@ try {
   git(root,"clone","-q",remote,upstream);
   fs.appendFileSync(path.join(upstream,"skills/peerletter/SKILL.md"),"\nUPSTREAM-UPDATE-MARKER\n");
   git(upstream,"commit","-qam","Upstream skill change");git(upstream,"push","-q");
-  const updated=await run(["update"]);assert.deepEqual(updated.installed,["codex","claude","pi"]);
+  const updated=await run(["update","--yes"]);assert.deepEqual(updated.installed,["codex","claude","pi"]);
   assert.equal(git(checkout,"rev-parse","HEAD"),git(upstream,"rev-parse","HEAD"));
   assert.ok(fs.readFileSync(path.join(home,".claude/peerletter-plugin/skills/peerletter/SKILL.md"),"utf8").includes("UPSTREAM-UPDATE-MARKER"),
     "setup update must refresh the copied Claude skill");
