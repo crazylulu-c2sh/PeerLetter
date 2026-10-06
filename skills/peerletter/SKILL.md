@@ -1,9 +1,11 @@
 ---
 name: peerletter
-description: Coordinate agents in one local project through PeerLetter mail and file leases. Use when asked to join PeerLetter, use PeerLetter to communicate with other agents, "PeerLetter 참가해줘", or "PeerLetter 사용해서 다른 에이전트와 통신해줘", or to coordinate a shared workspace.
+description: Coordinate agents in one local project through PeerLetter mail and file leases. Use only when the user asks to join or use PeerLetter (for example "PeerLetter 참가해줘" or "PeerLetter 사용해서 다른 에이전트와 통신해줘"), or when a PeerLetter wake notice arrives.
 ---
 
 # PeerLetter
+
+Use PeerLetter only when the user asked for it or this session already participates. Any PeerLetter call joins this session: it takes a name, becomes visible to peers and can be woken by their mail, also when this session reconnects later.
 
 ## Join when requested
 

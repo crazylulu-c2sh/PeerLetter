@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { installation, mergeHooks, mergeToml, quoteShell, writeWithBackup } from "../scripts/install.ts";
 import { Store } from "../src/store.ts";
-import { resolveProject } from "../src/project.ts";
+import { locateProject, resolveProject } from "../src/project.ts";
 import piExtension from "../pi/peerletter.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -227,6 +227,25 @@ test("Pi extension cannot inject or close another process's session owner",{time
     await rig.shutdown("new");assert.equal(store.agent(owner.name)?.online,1);
     assert.ok(store.leaseList().some(l=>l.id===lease.id));
   } finally {await rig.cleanup();store.close();}
+});
+
+test("hooks and the Pi extension create no state in a workspace that never used PeerLetter",{timeout:10000},async t=>{
+  const {root,project}=temp(t),state=path.join(root,"state"),session=randomUUID(),workspace=locateProject(project,state);
+  for(const kind of ["claude","codex"]) for(const event of ["SessionStart","UserPromptSubmit","PermissionRequest","PostToolUse","Stop","Interrupt","SessionEnd"]) {
+    const output=execFileSync(process.execPath,[path.join(repo,"hooks/hook.ts"),kind],
+      {env:{...process.env,PEERLETTER_STATE_DIR:state},input:JSON.stringify({session_id:session,cwd:project,hook_event_name:event,tool_use_id:"x"}),encoding:"utf8"});
+    assert.equal(output,"");
+  }
+  assert.equal(fs.existsSync(workspace.directory),false,"Hooks must not create a workspace database or directory");
+  const rig=piRig(t,project,state);
+  try {
+    await rig.start("startup",session);await rig.handlers.get("ui_prompt_start")!({});
+    assert.equal(fs.existsSync(workspace.directory),false,"The Pi extension and its MCP must not create state at session start");
+    // The first PeerLetter use creates the database; the extension then attaches and reports its gates.
+    const store=new Store(resolveProject(project,state));t.after(()=>store.close());
+    for(let i=0;i<60 && store.sessionFor("pi",[process.pid]) !== session;i++) await new Promise(resolve=>setTimeout(resolve,50));
+    assert.equal(store.sessionFor("pi",[process.pid]),session);assert.ok(store.gate(session).blocked_reasons.includes("ui"));
+  } finally {await rig.cleanup();}
 });
 
 test("Stop and mid-turn hooks tolerate sessions that never joined PeerLetter",t=>{

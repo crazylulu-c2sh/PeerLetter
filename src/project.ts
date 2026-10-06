@@ -20,7 +20,8 @@ export function privateDirectory(directory: string): void {
   fs.chmodSync(directory, 0o700);
 }
 
-export function resolveProject(cwd = process.env.PEERLETTER_PROJECT || process.cwd(), stateRoot?: string): Project {
+// Workspace paths without writing anything. A workspace that never used PeerLetter has no database.
+export function locateProject(cwd = process.env.PEERLETTER_PROJECT || process.cwd(), stateRoot?: string): Project {
   let canonical = fs.realpathSync(cwd);
   if (!fs.statSync(canonical).isDirectory()) throw new MailError("INVALID_PROJECT", "Project path must be a directory.");
   try {
@@ -31,8 +32,17 @@ export function resolveProject(cwd = process.env.PEERLETTER_PROJECT || process.c
   const key = createHash("sha256").update(canonical).digest("hex");
   const root = stateRoot || process.env.PEERLETTER_STATE_DIR
     || path.join(process.env.XDG_STATE_HOME || path.join(homedir(), ".local", "state"), "peerletter");
-  privateDirectory(root);
   const directory = path.join(root, key);
-  privateDirectory(directory);
   return { key, cwd: canonical, directory, database: path.join(directory, "peerletter.db") };
+}
+
+// Create or validate the private state directories before opening the database.
+export function prepareProject(project: Project): Project {
+  privateDirectory(path.dirname(project.directory));
+  privateDirectory(project.directory);
+  return project;
+}
+
+export function resolveProject(cwd = process.env.PEERLETTER_PROJECT || process.cwd(), stateRoot?: string): Project {
+  return prepareProject(locateProject(cwd, stateRoot));
 }

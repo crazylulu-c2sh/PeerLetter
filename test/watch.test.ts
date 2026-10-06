@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Store } from "../src/store.ts";
-import { resolveProject } from "../src/project.ts";
+import { locateProject, resolveProject } from "../src/project.ts";
 import { watchMail } from "../src/watch.ts";
 import { claudeWakeFile } from "../src/claude.ts";
 import { installation,writeWithBackup } from "../scripts/install.ts";
@@ -66,6 +66,25 @@ test("monitor waits for actual MCP startup, emits once without body or ACK, and 
     assert.equal(lines.length,2);assert.equal(store.peek(store.agent(actor.name)!).messages.length,2);
   } finally {stopped.abort();await watching;await sdk?.close();}
   assert.equal(store.watchStatus(session).online,false);
+});
+
+test("watch creates no database in an unused workspace and starts once PeerLetter is used",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-watch-unused-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const session=randomUUID(),workspace=locateProject(project,state),lines:string[]=[];
+  assert.equal(await watchMail({project,state,session,sink:"claude-async-rewake",once:true,timeoutMs:5000,pollMs:10,diagnostic:()=>{}}),false);
+  assert.equal(fs.existsSync(workspace.directory),false,"A one-shot waiter returns without creating state");
+  const stopped=new AbortController(),waits:string[]=[];
+  const watching=watchMail({project,state,session,signal:stopped.signal,pollMs:10,emit:async line=>{lines.push(line);},diagnostic:m=>{waits.push(m);}});
+  try {
+    await delay(100);assert.equal(fs.existsSync(workspace.directory),false,"The monitor waits without creating state");
+    assert.ok(waits.some(m=>/use PeerLetter/.test(m)));
+    const store=new Store(resolveProject(project,state));t.after(()=>store.close());
+    const actor=store.register({name:"claude-test",kind:"claude",session_id:session,wake:"claude-monitor"});
+    const sender=store.register({name:"sender",kind:"codex",session_id:randomUUID()});
+    const mail=store.send(sender,{to:actor.name,text:"PRIVATE",idempotency_key:"unused-then-used"}).message;
+    await until(()=>store.status(sender,mail.id).state === "notified");assert.equal(lines.length,1);
+  } finally {stopped.abort();await watching;}
 });
 
 test("monitor preserves pause/UI/compact, retries failed output and does not take another session",{timeout:10000},async t=>{

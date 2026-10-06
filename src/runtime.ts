@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { agentKind, ancestors, claudeSession, hostProcess, isProcessAlive, processInfo } from "./process.ts";
-import { resolveProject } from "./project.ts";
+import { locateProject, prepareProject } from "./project.ts";
 import { Store, hasHostSession } from "./store.ts";
 import type { Agent } from "./store.ts";
 import { MailError, validSession, validUuid } from "./errors.ts";
@@ -66,10 +66,10 @@ export class Runtime {
     if (native && configured && native !== configured) throw new MailError("SESSION_MISMATCH","Configured session differs from the calling Codex thread.");
     const host = hostProcess(kind);
     const registry = kind === "claude" ? claudeSession() : undefined;
-    const project = resolveProject(options.project || process.env.PEERLETTER_PROJECT || registry?.cwd || host?.cwd || process.cwd(), options.state);
-    // Without a database no session here has used PeerLetter; do not create one for a startup probe.
+    const project = locateProject(options.project || process.env.PEERLETTER_PROJECT || registry?.cwd || host?.cwd || process.cwd(), options.state);
+    // Without a database no session here has used PeerLetter; a startup probe creates no state.
     if (startup && !fs.existsSync(project.database)) throw unusedSession();
-    this.store = new Store(project);
+    this.store = new Store(prepareProject(project));
     this.hostPids = ancestors().map(p => p.pid);
     const environment = kind === "codex" ? process.env.CODEX_THREAD_ID : registry?.session_id;
     const mapped = this.store.sessionFor(kind,this.hostPids);
@@ -115,10 +115,10 @@ export class Runtime {
 
   private followClaude(session: string, source: string, cwd: string | undefined, automatic: boolean): void {
     validUuid(session,"INVALID_SESSION_ID");
-    const project = resolveProject(this.options.project || process.env.PEERLETTER_PROJECT || cwd || this.store.project.cwd,this.options.state);
+    const project = locateProject(this.options.project || process.env.PEERLETTER_PROJECT || cwd || this.store.project.cwd,this.options.state);
     const same = project.key === this.store.project.key;
     if (automatic && !same && !fs.existsSync(project.database)) throw unusedSession();
-    const nextStore = same ? this.store : new Store(project);
+    const nextStore = same ? this.store : new Store(prepareProject(project));
     try {
       // Throwing leaves this participant unchanged; the caller decides whether to close it.
       if (automatic && !nextStore.usedSession("claude",session)) throw unusedSession();

@@ -9,7 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { z } from "zod";
 import { Store } from "../src/store.ts";
-import { resolveProject } from "../src/project.ts";
+import { locateProject, resolveProject } from "../src/project.ts";
 import { startupRegistration } from "../src/runtime.ts";
 import { codexDaemon } from "./codex-fixture.ts";
 
@@ -215,6 +215,26 @@ test("a new startup role owner skips old backlog but leaves it available to rece
   await eventually(()=>store.status(sender,fresh.id).state==="notified","The notification receipt is written after sending the signal");
   assert.equal(store.status(sender,fresh.id).state,"notified");
   const mail=(await receiver.call("receive")).value;assert.deepEqual(mail.messages.map((m:any)=>m.id),[old.id,fresh.id]);
+});
+
+test("instructions scope PeerLetter to requested use and no tool claims to be read-only",{timeout:10000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-annotations-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const c=await client(undefined,"claude",project,state,[],undefined,true);
+  t.after(async()=>{await c.sdk.close();fs.rmSync(root,{recursive:true,force:true});});
+  const instructions=c.sdk.getInstructions()!;
+  assert.match(instructions,/Call its tools only when\s+the user asks you to use PeerLetter/);
+  assert.match(instructions,/While participating, check your inbox at task start/);
+  assert.doesNotMatch(instructions,/^PeerLetter connects agents in one local workspace\. Check your inbox/);
+  const tools=Object.fromEntries((await c.sdk.listTools()).tools.map(x=>[x.name.replace("peerletter_",""),x]));
+  for(const [name,x] of Object.entries(tools)) {
+    assert.equal(x.annotations?.readOnlyHint,false,`${name}: any first call joins this session`);
+    assert.equal(x.annotations?.openWorldHint,false);
+    // Codex 0.160 requires approval for every destructive MCP call, which would prompt on each ACK.
+    assert.equal(x.annotations?.destructiveHint,false,`${name}: changes only this participant's own records`);
+    assert.doesNotMatch(String(x.description),/task start|before edit/i,`${name}: tool descriptions must not schedule use`);
+  }
+  for(const name of ["receive","lease_claim"]) assert.equal(tools[name].annotations?.idempotentHint,false,name);
+  assert.equal(fs.existsSync(locateProject(project,state).database),false,"tools/list must not create a workspace database");
 });
 
 test("initialize and tools/list never register unused clients or reserve fixed names",{timeout:20000},async t=>{
