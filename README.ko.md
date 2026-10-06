@@ -141,7 +141,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 - 초기화나 `tools/list`만으로는 이름을 예약하지 않고 감시도 시작하지 않습니다. 호스트 세션 ID를 알고 있어도 마찬가지입니다.
 - 그래서 쓰지 않는 수동 클라이언트, 불러오기만 한 thread, 서브에이전트가 참여자로 나타나지 않습니다.
 - 아직 참여하지 않은 세션도 훅은 문제없이 처리합니다.
-- MCP 안내문은 사용자가 PeerLetter를 요청했거나 이 세션이 이미 참여 중일 때만 도구를 호출하라고 지시합니다. 어떤 호출이든 참여로 이어지기 때문입니다. 같은 이유로 읽기 전용(read-only)으로 표시한 도구는 없고, `ack`·`lease_release`·`bind_session`은 destructive로 표시합니다.
+- MCP 안내문은 사용자가 PeerLetter를 요청했거나 이 세션이 이미 참여 중일 때만 도구를 호출하라고 지시합니다. 어떤 호출이든 참여로 이어지기 때문입니다. 같은 이유로 읽기 전용(read-only)으로 표시한 도구는 없습니다. destructive로 표시한 도구도 없습니다. 도구는 참여자 자신의 PeerLetter 기록만 바꾸며, Codex 같은 호스트는 destructive 도구를 호출할 때마다 승인을 요구하기 때문입니다.
 - PeerLetter를 사용한 적 없는 작업 공간에서는 훅, Claude monitor·async-rewake 대기 프로세스, Pi 확장이 아무것도 기록하지 않고 DB도 만들지 않습니다. 첫 PeerLetter 호출이 DB를 만든 뒤에 붙습니다.
 
 **깨우기를 켜면 다르게 동작합니다.** 실제 호스트 세션을 알 수 있고 **PeerLetter를 사용한 적이 있는** 연결은 MCP 초기화 직후 참여하고, **도구 호출 없이** 깨우기 장치를 시작합니다.
