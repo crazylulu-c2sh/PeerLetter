@@ -38,6 +38,7 @@ test("monitor waits for actual MCP startup, emits once without body or ACK, and 
   const {project,state,store,session}=fixture(t),stopped=new AbortController(),lines:string[]=[];
   const watching=watchMail({project,state,session,signal:stopped.signal,pollMs:10,emit:async line=>{lines.push(line);},diagnostic:()=>{}});
   let sdk:Client|undefined;
+  store.recordUse("claude",session);
   try {
     assert.equal(store.peers().length,0,"watch must not create an offline or online actor");
     sdk=await mcp(project,state,session);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Optional installed-client regression. All projects/settings/state and model
 # requests are isolated. UI trust is accepted only for this generated fixture.
-import os,json,tempfile,subprocess,threading,http.server,pty,select,time,sqlite3,shutil,re,signal,sys
+import os,json,tempfile,subprocess,threading,http.server,pty,select,time,sqlite3,shutil,re,signal,sys,uuid
 repo=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 node=shutil.which('node')
 if not node or not shutil.which('claude'):raise SystemExit('Requires Node 24.18+, installed Claude Code and a Unix PTY.')
@@ -31,14 +31,18 @@ def run(wake):
   env.pop(key,None)
  env.update(CLAUDE_CONFIG_DIR=config,PEERLETTER_STATE_DIR=state,ANTHROPIC_API_KEY='sk-ant-peerletter-fixture',ANTHROPIC_BASE_URL='http://127.0.0.1:'+str(server.server_port),CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',DISABLE_TELEMETRY='1',TERM='xterm-256color')
  subprocess.run([node,repo+'/scripts/install.ts','--project',project,'--client','claude','--wake',wake,'--apply'],env=env,cwd=repo,check=True,stdout=subprocess.DEVNULL)
+ # Only a session that has used PeerLetter joins without a tool call: launch one recorded as used.
+ session=str(uuid.uuid4())
+ doctor=json.loads(subprocess.run([node,repo+'/src/cli.ts','--project',project,'--state',state,'doctor'],env=env,check=True,capture_output=True,text=True).stdout)
+ seed=sqlite3.connect(doctor['database']);seed.execute("INSERT INTO used_sessions VALUES('claude',?,?)",(session,int(time.time()*1000)));seed.commit();seed.close()
  pid,fd=pty.fork()
  if pid==0:
-  os.chdir(project);os.execvpe('claude',['claude','--model','sonnet','Reply fixture ready.'],env)
+  os.chdir(project);os.execvpe('claude',['claude','--model','sonnet','--session-id',session,'Reply fixture ready.'],env)
  import fcntl,termios,struct
  fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
  output='';handled=set();db=None;base=len(requests);sent=False;mail_base=0;prompted=False;trust_at=None;deadline=time.time()+75
  transition_test='--session-transitions' in sys.argv
- stage=0;original=None;clear_pid=None;resume_pid=None
+ stage=0;original=None;resume_pid=None
  def command(text):
   os.write(fd,text.encode());time.sleep(0.3);os.write(fd,b'\r')
  try:
@@ -58,19 +62,19 @@ def run(wake):
       db=sqlite3.connect(os.path.join(directory,'peerletter.db'));db.row_factory=sqlite3.Row;break
    if db is not None and len(requests)>base and not sent:
     actors=db.execute("SELECT a.name,a.session_id,a.wake,a.pid FROM agents a WHERE kind='claude' AND online=1").fetchall()
+    if transition_test and stage==1:
+     # /clear starts a session that never used PeerLetter: MCP leaves the old one and does not join.
+     if actors or db.execute('SELECT online FROM agents WHERE name=?',(original['name'],)).fetchone()['online']:continue
+     time.sleep(1);command('/resume '+original['session_id']);stage=2;print(wake,'left unused /clear session; requested real /resume',flush=True);continue
     if actors:
      actor=actors[0]
+     assert actor['session_id']==session,'Only the used session may join without a tool call'
      if transition_test:
       if stage==0:
        original=dict(actor);time.sleep(1);command('/clear');stage=1;print(wake,'requested real /clear',flush=True);continue
-      if stage==1:
-       if actor['session_id']==original['session_id']:continue
-       clear_pid=actor['pid'];assert actor['name']!=original['name'];assert not db.execute('SELECT online FROM agents WHERE name=?',(original['name'],)).fetchone()['online']
-       time.sleep(1);command('/resume '+original['session_id']);stage=2;print(wake,'requested real /resume',flush=True);continue
       if stage==2:
-       if actor['session_id']!=original['session_id']:continue
        assert actor['name']==original['name'];resume_pid=actor['pid'];time.sleep(1);command('Reply fixture ready after resume.');stage=3
-       print(wake,'resumed real session',actor['session_id'],'same MCP process',resume_pid==clear_pid,flush=True);continue
+       print(wake,'resumed real session',actor['session_id'],'same MCP process',resume_pid==original['pid'],flush=True);continue
      owners=db.execute('SELECT * FROM watch_owners WHERE session_id=?',(actor['session_id'],)).fetchall()
      if owners:
       time.sleep(1)
@@ -84,7 +88,7 @@ def run(wake):
     time.sleep(1)
     notice=db.execute('SELECT state FROM deliveries').fetchone()['state']
     assert notice=='notified',notice
-    print(json.dumps({'wake':wake,'native_interactive_idle_wake':True,'requests':len(requests)-base,'external_model_requests':0,'mail_state':notice,'monitor_session_env_verified':wake=='monitor','session_transitions':transition_test,'same_mcp_on_resume':resume_pid==clear_pid if transition_test else None}),flush=True)
+    print(json.dumps({'wake':wake,'native_interactive_idle_wake':True,'requests':len(requests)-base,'external_model_requests':0,'mail_state':notice,'monitor_session_env_verified':wake=='monitor','session_transitions':transition_test,'same_mcp_on_resume':resume_pid==original['pid'] if transition_test else None}),flush=True)
     return True
   print(wake,'not completed; rendered screen tail:',clean[-4500:],flush=True)
   return False

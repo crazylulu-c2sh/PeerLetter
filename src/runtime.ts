@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { agentKind, ancestors, claudeSession, hostProcess, isProcessAlive, processInfo } from "./process.ts";
 import { resolveProject } from "./project.ts";
@@ -12,6 +13,10 @@ export interface RuntimeOptions {
 }
 
 export interface HostBinding { session_id: string; source: string }
+
+function unusedSession(): MailError {
+  return new MailError("UNUSED_SESSION", "This host session has not used PeerLetter; it joins on its first PeerLetter tool call.");
+}
 
 // This probe must not open the database or allocate a name. A PID mapping can be
 // the last of several Codex threads, even when the table contains just one row.
@@ -48,6 +53,7 @@ export class Runtime {
   private closed = false;
   private sessionSource: string;
   private registrationMode: "startup" | "tool-call";
+  private recordedUse?: string;
 
   constructor(clientName: string, options: RuntimeOptions = {}, meta?: Record<string,unknown>, recoverySession?: string, startup?: HostBinding) {
     this.options = options;
@@ -60,8 +66,10 @@ export class Runtime {
     if (native && configured && native !== configured) throw new MailError("SESSION_MISMATCH","Configured session differs from the calling Codex thread.");
     const host = hostProcess(kind);
     const registry = kind === "claude" ? claudeSession() : undefined;
-    const project = options.project || process.env.PEERLETTER_PROJECT || registry?.cwd || host?.cwd || process.cwd();
-    this.store = new Store(resolveProject(project, options.state));
+    const project = resolveProject(options.project || process.env.PEERLETTER_PROJECT || registry?.cwd || host?.cwd || process.cwd(), options.state);
+    // Without a database no session here has used PeerLetter; do not create one for a startup probe.
+    if (startup && !fs.existsSync(project.database)) throw unusedSession();
+    this.store = new Store(project);
     this.hostPids = ancestors().map(p => p.pid);
     const environment = kind === "codex" ? process.env.CODEX_THREAD_ID : registry?.session_id;
     const mapped = this.store.sessionFor(kind,this.hostPids);
@@ -75,6 +83,7 @@ export class Runtime {
       || (wake.startsWith("claude-") && kind !== "claude")) {
       this.store.close(); throw new MailError("INVALID_WAKE", "Use none, claude-monitor, claude-async-rewake, claude-channel, codex-queue or pi-extension for the matching client.");
     }
+    if (startup && !this.store.usedSession(kind,session)) { this.store.close(); throw unusedSession(); }
     try {
       this.actor = this.store.register({ name: options.name || process.env.PEERLETTER_NAME,
         kind, session_id: session, host_pid: host?.pid, wake, session_source:this.sessionSource });
@@ -83,7 +92,8 @@ export class Runtime {
     } catch (error) { this.store.close(); throw error; }
   }
 
-  refresh(): void {
+  // automatic: a background check that may follow the host only into a session that has used PeerLetter.
+  refresh(automatic = false): void {
     if (this.closed) return;
     if (!this.options.session && !process.env.PEERLETTER_SESSION_ID
       && this.sessionSource !== "mcp-metadata" && this.sessionSource !== "self-binding") {
@@ -96,18 +106,22 @@ export class Runtime {
       if (session && hasHostSession(this.actor.kind,session,environment ? "environment" : "hook") && session !== this.actor.session_id) {
         if (this.actor.kind === "claude" && agentKind(processInfo(this.actor.host_pid!)?.name) === "claude"
           && (mapped || registry?.host_pid === this.actor.host_pid)) {
-          this.followClaude(session,mapped ? "hook" : "environment",registry?.cwd);
+          this.followClaude(session,mapped ? "hook" : "environment",registry?.cwd,automatic);
         } else this.adoptSession(session,environment ? "environment" : "hook");
       }
     }
     this.store.touch(this.actor);
   }
 
-  private followClaude(session: string, source: string, cwd?: string): void {
+  private followClaude(session: string, source: string, cwd: string | undefined, automatic: boolean): void {
     validUuid(session,"INVALID_SESSION_ID");
     const project = resolveProject(this.options.project || process.env.PEERLETTER_PROJECT || cwd || this.store.project.cwd,this.options.state);
-    const nextStore = project.key === this.store.project.key ? this.store : new Store(project);
+    const same = project.key === this.store.project.key;
+    if (automatic && !same && !fs.existsSync(project.database)) throw unusedSession();
+    const nextStore = same ? this.store : new Store(project);
     try {
+      // Throwing leaves this participant unchanged; the caller decides whether to close it.
+      if (automatic && !nextStore.usedSession("claude",session)) throw unusedSession();
       const next = nextStore.register({name:this.options.name || process.env.PEERLETTER_NAME,
         kind:"claude",session_id:session,session_source:source,host_pid:this.actor.host_pid!,wake:this.actor.wake,
         ...(nextStore === this.store ? {replace:this.actor} : {})});
@@ -140,6 +154,7 @@ export class Runtime {
       throw new MailError("SESSION_MISMATCH","This participant already has another host session. Use the thread ID from your own current session.");
     }
     if (!hasHostSession(this.actor.kind,this.actor.session_id,this.sessionSource)) this.adoptSession(session,"self-binding");
+    this.recordUse();
     return this.whoami();
   }
 
@@ -152,6 +167,14 @@ export class Runtime {
     }
     else if (source !== this.sessionSource) this.store.setSessionSource(this.actor,source);
     this.sessionSource = source;
+  }
+
+  // Called for every tool call. A later connection of this host session may then join automatically.
+  recordUse(): void {
+    const { kind, session_id } = this.actor;
+    if (this.closed || this.recordedUse === session_id || !hasHostSession(kind,session_id,this.sessionSource)) return;
+    this.store.recordUse(kind,session_id);
+    this.recordedUse = session_id;
   }
 
   codexTarget(): string {

@@ -63,6 +63,8 @@ export class MailWatcher {
         this.store.setWake(this.actor, this.sink);
         this.failures = 0; this.retryAt = 0;
       } catch (error) {
+        // A stopping watcher no longer reports status for its participant.
+        if (this.stopped) return;
         this.failures++;
         this.retryAt = Date.now() + Math.min(30000, 1000 * 2 ** Math.min(this.failures - 1, 5));
         try { this.store.setWake(this.actor, this.sink, error instanceof Error ? error.message : String(error)); } catch { /* Closing. */ }
