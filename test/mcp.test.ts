@@ -229,8 +229,8 @@ test("instructions scope PeerLetter to requested use and no tool claims to be re
   for(const [name,x] of Object.entries(tools)) {
     assert.equal(x.annotations?.readOnlyHint,false,`${name}: any first call joins this session`);
     assert.equal(x.annotations?.openWorldHint,false);
-    // Codex 0.160 requires approval for every destructive MCP call, which would prompt on each ACK.
-    assert.equal(x.annotations?.destructiveHint,false,`${name}: changes only this participant's own records`);
+    // Codex 0.160 requires approval for every destructive MCP call: only the rare recovery binding asks.
+    assert.equal(x.annotations?.destructiveHint,name === "bind_session",`${name}: destructive only for bind_session`);
     assert.doesNotMatch(String(x.description),/task start|before edit/i,`${name}: tool descriptions must not schedule use`);
   }
   for(const name of ["receive","lease_claim"]) assert.equal(tools[name].annotations?.idempotentHint,false,name);

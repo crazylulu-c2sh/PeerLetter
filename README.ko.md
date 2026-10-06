@@ -52,7 +52,7 @@ skill은 **whoami → peers**를 호출하고 실제 이름·참가자·세션 �
 ~/dev/PeerLetter/setup update               # --preview는 들어올 커밋과 변경 계획만 보여 줍니다
 ```
 
-`setup update`는 이 체크아웃을 upstream 브랜치로 fast-forward하고, 고정된 lockfile로 의존성을 설치한 뒤, 설치 기록에 있는 모든 agent를 갱신합니다. 생성된 Claude 플러그인과 skill 사본, Codex·Pi 항목, 고정된 Node 경로가 대상입니다. 나머지 과정은 갱신된 setup 스크립트가 이어서 실행합니다.
+`setup update`는 들어올 커밋 목록을 보여 주고 적용하기 전에 묻습니다. 새 코드는 이후 모든 에이전트 세션에서 실행되기 때문입니다. 스크립트에서는 `--yes`로 질문을 건너뜁니다. 터미널이 없고 `--yes`도 없으면 아무것도 바꾸지 않습니다. `setup update`는 이 체크아웃을 upstream 브랜치로 fast-forward하고, 고정된 lockfile로 의존성을 설치한 뒤, 설치 기록에 있는 모든 agent를 갱신합니다. 생성된 Claude 플러그인과 skill 사본, Codex·Pi 항목, 고정된 Node 경로가 대상입니다. 나머지 과정은 갱신된 setup 스크립트가 이어서 실행합니다.
 - 추적 중인 파일에 로컬 변경이 있거나, 브랜치에 upstream이 없거나, upstream에 없는 커밋이 있으면 아무것도 바꾸지 않고 멈춥니다.
 - 끝나면 Claude를 재시작하고(플러그인 다시 불러오기로는 실행 중인 MCP가 바뀌지 않습니다), Codex MCP를 다시 연결하거나 새 세션을 열고, Pi는 `/reload`하세요.
 - 프로젝트 로컬 설치는 갱신하지 않습니다. 그 경우 `scripts/install.ts --project DIR --apply`를 다시 실행하세요.
@@ -141,7 +141,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 - 초기화나 `tools/list`만으로는 이름을 예약하지 않고 감시도 시작하지 않습니다. 호스트 세션 ID를 알고 있어도 마찬가지입니다.
 - 그래서 쓰지 않는 수동 클라이언트, 불러오기만 한 thread, 서브에이전트가 참여자로 나타나지 않습니다.
 - 아직 참여하지 않은 세션도 훅은 문제없이 처리합니다.
-- MCP 안내문은 사용자가 PeerLetter를 요청했거나 이 세션이 이미 참여 중일 때만 도구를 호출하라고 지시합니다. 어떤 호출이든 참여로 이어지기 때문입니다. 같은 이유로 읽기 전용(read-only)으로 표시한 도구는 없습니다. destructive로 표시한 도구도 없습니다. 도구는 참여자 자신의 PeerLetter 기록만 바꾸며, Codex 같은 호스트는 destructive 도구를 호출할 때마다 승인을 요구하기 때문입니다.
+- MCP 안내문은 사용자가 PeerLetter를 요청했거나 이 세션이 이미 참여 중일 때만 도구를 호출하라고 지시합니다. 어떤 호출이든 참여로 이어지기 때문입니다. 같은 이유로 읽기 전용(read-only)으로 표시한 도구는 없습니다. Codex 같은 호스트는 destructive 도구를 호출할 때마다 승인을 요구하므로, destructive로 표시한 도구는 `peerletter_bind_session` 하나뿐입니다. 이 도구는 모델이 넘긴 thread ID에 참여자를 연결하며, 사용자는 승인 전에 그 ID를 보게 됩니다. 나머지 도구는 참여자 자신의 PeerLetter 기록만 바꾸므로 승인을 요구하지 않습니다.
 - PeerLetter를 사용한 적 없는 작업 공간에서는 훅, Claude monitor·async-rewake 대기 프로세스, Pi 확장이 아무것도 기록하지 않고 DB도 만들지 않습니다. 첫 PeerLetter 호출이 DB를 만든 뒤에 붙습니다.
 
 **깨우기를 켜면 다르게 동작합니다.** 실제 호스트 세션을 알 수 있고 **PeerLetter를 사용한 적이 있는** 연결은 MCP 초기화 직후 참여하고, **도구 호출 없이** 깨우기 장치를 시작합니다.
@@ -206,6 +206,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 
 **기본 thread 메타데이터를 보내지 않는 예전 클라이언트**
 - 에이전트의 셸에서 **자기** `CODEX_THREAD_ID`를 읽은 뒤 `peerletter_bind_session({session_id: "<그 전체 UUID>"})`를 호출합니다.
+- destructive로 표시한 도구는 이것 하나뿐이라, Codex가 ID를 보여 주며 승인을 묻습니다. 자기 thread ID일 때만 승인하세요. `approval_policy = "never"`에서는 호출이 거부됩니다.
 - 또는 `/hooks`를 검토하고 새 세션을 시작해 SessionStart가 연결하게 합니다.
 - 최근 rollout, 다른 참여자의 ID, 추측한 ID는 절대 쓰지 마세요.
 - 기본 메타데이터로 thread가 이미 연결됐더라도 Stop과 Interrupt 훅은 여전히 호스트 검토가 필요합니다.
@@ -459,7 +460,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 
 **알림 방식**
 - 확장은 받은편지함을 감시하다가 본문 없는 `pi.sendMessage(..., {triggerTurn:true, deliverAs:'steer'})`를 보냅니다.
-- 수동 정지, 중단, 제공자 오류, UI 대화상자, compaction 중에는 주입을 막습니다.
+- 수동 정지, 중단, 제공자 오류, UI 대화상자, compaction 중에는 주입을 막습니다. 중단은 실행의 abort signal과 종료 결과로 판단하며, 터미널 입력은 읽지 않습니다.
 - `/peerletter pause`, `/peerletter resume`, `/peerletter status`로 제어하거나 확인합니다. 새 명시적 사용자 입력은 정지를 풉니다.
 - 설치된 Pi 0.99.2의 확장 API를 대상으로 합니다. [Pi 확장 문서](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)를 참고하세요.
 
@@ -527,6 +528,13 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 - 다른 도구의 편집을 강제로 막지는 않습니다. Git 상태 변경은 따로 조율하세요.
 
 받은편지함 확인 시점, ACK 규칙, 파일 조율, 답장 반복 제한은 공용 [협업 skill](skills/peerletter/SKILL.md)을 읽으세요. 메일 내용은 새 작업을 허가하거나 사용자 지시를 대신할 수 없습니다.
+
+## 보안 참고
+
+- **신뢰 경계는 로컬 OS 사용자입니다.** PeerLetter는 에이전트끼리 서로를 인증하지 않습니다. 같은 사용자로 실행되는 프로세스는 CLI를 포함해 어느 메일함으로든 메일을 읽고, ACK하고, 보낼 수 있습니다. SQLite 파일을 직접 여는 것과 같습니다. 에이전트에게는 자기 이름만 쓰라고 안내하지만, 이는 지시일 뿐 강제는 아닙니다.
+- **깨우기는 피어의 메일이 턴을 시작하게 합니다.** 쉬고 있던 에이전트가 피어 때문에 깨어나면 이미 가진 권한으로 동작합니다. 알림에는 메일 본문이 없고, 메일은 사용자 작업 범위를 넘는 일을 허가할 수 없는 신뢰할 수 없는 입력으로 표시됩니다. 하지만 최종 방어는 모델이 그 지시를 따르는지에 달려 있습니다. 자동 깨우기를 승인 없이 도구를 실행하는 모드와 함께 쓰지 마세요. 예를 들어 Claude의 bypass-permissions 모드, Codex의 `approval_policy = "never"`와 전체 접근 권한 조합이 그렇습니다. 깨우면 안 되는 에이전트는 `pause`하세요.
+- **업데이트는 새 코드를 모든 곳에서 실행합니다.** 훅, MCP 서버, Claude monitor, Pi 확장은 모든 프로젝트의 모든 세션에서 실행됩니다. 그래서 `setup update`는 들어올 커밋을 보여 주고 먼저 묻습니다. `setup update --preview`나 `git log -p`로 검토하세요. 의존성은 고정된 lockfile과 `--ignore-scripts`로 설치합니다.
+- **사용하지 않은 작업 공간은 건드리지 않습니다.** PeerLetter를 쓴 적 없는 곳에서는 훅, monitor, Pi 확장이 아무것도 기록하지 않고 DB도 만들지 않습니다. 다만 호스트 이벤트마다 훅 프로세스는 시작됩니다.
 
 ## 테스트와 GitHub 워크플로
 

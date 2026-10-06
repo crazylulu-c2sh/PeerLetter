@@ -124,6 +124,30 @@ test("Pi extension binds one MCP identity, respects manual/UI/abort gates and cl
   assert.equal(store.agent(receiver.name)?.online,0);
 });
 
+test("Pi extension reads no terminal input and injects nothing while the current run is aborting",{timeout:10000},async t=>{
+  const {root,project}=temp(t);const state=path.join(root,"state"),session=randomUUID();
+  const oldState=process.env.PEERLETTER_STATE_DIR;process.env.PEERLETTER_STATE_DIR=state;
+  t.after(()=>{if(oldState===undefined)delete process.env.PEERLETTER_STATE_DIR;else process.env.PEERLETTER_STATE_DIR=oldState;});
+  const store=new Store(resolveProject(project,state));t.after(()=>store.close());
+  const handlers=new Map<string,Function>(),notices:any[]=[];let inputListeners=0,signal:AbortSignal|undefined;
+  const pi={on:(event:string,handler:Function)=>{handlers.set(event,handler);},registerCommand:()=>{},registerMcpServer:()=>{},
+    unregisterMcpServer:()=>{},sendMessage:(message:any)=>{notices.push(message);}};
+  const ctx={cwd:project,mode:"tui",sessionManager:{getSessionId:()=>session},isIdle:()=>false,get signal(){return signal;},
+    ui:{setStatus:()=>{},notify:()=>{},onTerminalInput:()=>{inputListeners++;return ()=>{};}}} as unknown as ExtensionContext;
+  piExtension(pi as unknown as ExtensionAPI);
+  await handlers.get("session_start")!({},ctx);
+  assert.equal(inputListeners,0,"The extension must not observe terminal input");
+  store.register({name:"pi",kind:"pi",session_id:session,host_pid:process.pid});
+  const sender=store.register({name:"codex",kind:"codex",session_id:randomUUID()});
+  const run=new AbortController();signal=run.signal;run.abort();
+  store.send(sender,{to:"pi",text:"HIDDEN",idempotency_key:"aborting"});
+  await new Promise(resolve=>setTimeout(resolve,850));assert.equal(notices.length,0,"No notice while the user's abort settles");
+  await handlers.get("agent_before_settle")!({outcome:"aborted"});assert.equal(store.gate(session).pause_reason,"user_abort");
+  signal=undefined;await handlers.get("input")!({source:"interactive"});await handlers.get("ui_prompt_end")!({});
+  assert.equal(notices.length,1);assert.ok(!notices[0].content.includes("HIDDEN"));
+  await handlers.get("session_shutdown")!({reason:"quit"});
+});
+
 function piRig(t:test.TestContext,project:string,state:string) {
   const oldState=process.env.PEERLETTER_STATE_DIR;process.env.PEERLETTER_STATE_DIR=state;
   t.after(()=>{if(oldState===undefined)delete process.env.PEERLETTER_STATE_DIR;else process.env.PEERLETTER_STATE_DIR=oldState;});
