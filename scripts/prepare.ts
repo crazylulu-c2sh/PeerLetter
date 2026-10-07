@@ -56,6 +56,8 @@ ${quoteShell(cli)} --name codex-review status <MESSAGE_UUID>
 
 송신→수신 상태는 accepted→delivered→acknowledged입니다. receive는 ACK하지 않습니다. 같은 키로 재송신하면 기존 메시지를 반환합니다.
 
+오프라인 메일함은 --name OLD rename --to NEW로 바꾸세요. bound 자동 이름 세션은 사용자가 요청할 때 peerletter_rename으로 변경하며 호스트 승인이 필요합니다. 메일과 깨우기 상태를 유지하고 옛 이름은 예약됩니다. 최종 이름은 종류 접두사를 유지합니다(Claude hq → claude-hq, claude-hq → claude-hq, codex-hq → claude-codex-hq; bare claude로 되돌리기 가능, CLI new → cli-new). 요청·최종 이름은 모두 64자 이하입니다. 현재 세션에서 이 메일함에 메일을 보낸 온라인 피어에게 새 이름을 발신자로 한 일반 변경 알림을 보냅니다. 알림에는 옛·새 이름, 새 주소, 옛 주소의 PEER_RENAMED 오류와 답장 불필요 안내가 있습니다. 받은 피어는 from_name과 peers의 previous_names로 주소를 확인해 갱신하고 ACK하며 답장하지 않습니다.
+
 ## 새 세션에서 MCP 연결
 
 \`\`\`bash

@@ -10,6 +10,7 @@ const help = `PeerLetter — local agent mail, JSON output
   node src/cli.ts [--project DIR] [--name AGENT] COMMAND [options]
 
   register                         Create an offline named mailbox
+  rename --to NEW                  Rename an offline --name mailbox
   serve                            Keep a named participant online until stopped
   watch [--session UUID] [--name NAME] [--once] [--timeout-ms MS]
                                    Body-free Claude monitor; no ACK or registration
@@ -57,13 +58,25 @@ try {
     await new Promise<void>(() => {});
   } else {
     store = new Store(resolveProject(options.project,options.state));
-    const actor = command === "peers" || command === "doctor" || command === "prune" || command === "lease-list"
-      ? undefined : store.cliActor(required(options.name || process.env.PEERLETTER_NAME,"--name"),options.session,options.kind);
+    const actor = command === "peers" || command === "doctor" || command === "prune" || command === "lease-list" || command === "rename"
+      ? undefined : store.cliActor(required(options.name || process.env.PEERLETTER_NAME,"--name"),options.session,options.kind,command === "register");
     let result: unknown;
     const number = (name: "wait-ms" | "limit" | "ttl" | "days", fallback: number) => v[name] === undefined ? fallback : Number(v[name]);
     switch (command) {
       case "register": case "whoami": result = { ...actor, ...store.publicAgent(store.agent(actor!.name)!),
         project: store.project.cwd, project_key: store.project.key, database: store.project.database }; break;
+      case "rename": {
+        const name = required(options.name || process.env.PEERLETTER_NAME,"--name");
+        const row = store.agent(name);
+        if (!row) {
+          const renamed = store.renamedTo(name);
+          if (renamed) throw new MailError("NAME_RESERVED",`${name} was renamed to ${renamed}.`,{renamed_to:renamed});
+          throw new MailError("PEER_NOT_FOUND",`Unknown mailbox ${name}.`);
+        }
+        const renamed = store.renameAgent({name,session_id:row.session_id},required(v.to,"--to"),true);
+        result = {...store.publicAgent(renamed.agent),rename:{from:renamed.from,requested:renamed.requested,name:renamed.agent.name,notified:renamed.notified}};
+        break;
+      }
       case "peers": result = { peers: store.peers() }; break;
       case "send": {
         if (v.text && v["text-file"]) throw new MailError("INVALID_ARGUMENT", "Use --text or --text-file.");

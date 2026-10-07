@@ -229,8 +229,8 @@ test("instructions scope PeerLetter to requested use and no tool claims to be re
   for(const [name,x] of Object.entries(tools)) {
     assert.equal(x.annotations?.readOnlyHint,false,`${name}: any first call joins this session`);
     assert.equal(x.annotations?.openWorldHint,false);
-    // Codex 0.160 requires approval for every destructive MCP call: only the rare recovery binding asks.
-    assert.equal(x.annotations?.destructiveHint,name === "bind_session",`${name}: destructive only for bind_session`);
+    // Codex 0.160 requires approval for every destructive MCP call: binding and rename ask.
+    assert.equal(x.annotations?.destructiveHint,name === "bind_session" || name === "rename",`${name}: destructive for binding and rename`);
     assert.doesNotMatch(String(x.description),/task start|before edit/i,`${name}: tool descriptions must not schedule use`);
   }
   for(const name of ["receive","lease_claim"]) assert.equal(tools[name].annotations?.idempotentHint,false,name);
@@ -244,7 +244,7 @@ test("initialize and tools/list never register unused clients or reserve fixed n
   for(const kind of ["codex","claude","pi"]) {
     const name=`fixed-${kind}`;
     const unused=await client(name,kind,project,state,[],undefined,true);clients.push(unused);
-    assert.equal((await unused.sdk.listTools()).tools.length,11);
+    assert.equal((await unused.sdk.listTools()).tools.length,12);
     assert.equal(store.agent(name),undefined);
     const active=await client(name,kind,project,state,[],undefined,true);clients.push(active);
     const thread=randomUUID(),meta=kind === "codex" ? {threadId:thread,sessionId:randomUUID()} : undefined;
@@ -322,7 +322,7 @@ test("three real stdio MCP processes share mail, identity, concurrent writes and
   const who=(await codex.call("whoami")).value;
   assert.equal(who.name,"codex-review");assert.equal(who.kind,"codex");assert.equal(who.project,project);
   assert.equal((await pi.call("peers")).value.peers.filter((p:any)=>p.online).length,3);
-  assert.equal((await codex.sdk.listTools()).tools.length,11);
+  assert.equal((await codex.sdk.listTools()).tools.length,12);
   const pending=claude.call("receive",{wait_ms:3000});
   const send=(await codex.call("send",{to:"claude-build",text:"implementation ready",idempotency_key:"handoff"})).value;
   assert.equal((await pending).value.messages[0].id,send.message.id);
@@ -428,4 +428,42 @@ test("SIGKILL presence cleanup, durable unread mail and clean EOF shutdown",{tim
   await replacement.sdk.close();
   for(let i=0;i<20&&store.peers().find(p=>p.name==="b")?.online;i++)await new Promise(resolve=>setTimeout(resolve,50));
   assert.equal(store.peers().find(p=>p.name==="b")?.online,false);
+});
+
+test("MCP rename retains the connection and channel wake, with configured and unbound guards",{timeout:15000},async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-rename-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
+  const session=randomUUID();
+  const receiver=await client(undefined,"claude",project,state,["--session",session,"--wake","claude-channel"]);
+  const role=await client("role","pi",project,state,["--session",randomUUID()]);
+  const pi=await client(undefined,"pi",project,state);
+  const unbound=await client(undefined,"codex",project,state);
+  const store=new Store(resolveProject(project,state));
+  t.after(async()=>{await Promise.all([receiver,role,pi,unbound].map(c=>c.sdk.close()));store.close();fs.rmSync(root,{recursive:true,force:true});});
+  const old=(await receiver.call("whoami")).value.name;
+  const peer=await client("peer","codex",project,state);
+  t.after(()=>peer.sdk.close());
+  const prior=(await peer.call("send",{to:old,text:"before rename",idempotency_key:"prior"})).value.message;
+  await receiver.call("ack",{message_ids:[prior.id]});
+  const renamed=await receiver.call("rename",{name:"reviewer"});assert.equal(renamed.error,false);
+  assert.equal(renamed.value.name,"claude-reviewer");assert.deepEqual(renamed.value.previous_names,[old]);
+  assert.equal((await receiver.call("whoami")).value.name,"claude-reviewer");
+  assert.deepEqual(renamed.value.rename,{from:old,requested:"reviewer",name:"claude-reviewer",notified:["peer"]});
+  const notice=(await peer.call("receive")).value.messages;
+  assert.equal(notice.length,1);assert.equal(notice[0].from_name,"claude-reviewer");
+  assert.match(notice[0].text,/PeerLetter rename notice:/);
+  await peer.call("ack",{message_ids:[notice[0].id]});
+  const notices:string[]=[];
+  receiver.sdk.setNotificationHandler(z.object({method:z.literal("notifications/claude/channel"),params:z.object({content:z.string()})}),n=>{notices.push(n.params.content);});
+  const sender=store.register({name:"sender",kind:"codex",session_id:randomUUID()});
+  const mail=store.send(sender,{to:"claude-reviewer",text:"PRIVATE",idempotency_key:"renamed"}).message;
+  await eventually(()=>notices.length===1,"Renamed channel must wake");
+  await eventually(()=>store.status(sender,mail.id).state==="notified","Renamed notice must be recorded");
+  await new Promise(resolve=>setTimeout(resolve,850));assert.equal(notices.length,1);
+  const received=(await receiver.call("receive")).value;assert.equal(received.messages[0].id,mail.id);
+  assert.equal((await receiver.call("ack",{message_ids:[mail.id]})).error,false);
+  const sent=await receiver.call("send",{to:"sender",text:"done",idempotency_key:"done",reply_to:mail.id});
+  assert.equal(sent.error,false);assert.equal(sent.value.message.from_name,"claude-reviewer");
+  assert.equal((await role.call("rename",{name:"configured"})).value.error.code,"NAME_CONFIGURED");
+  for(const c of [pi,unbound]) assert.equal((await c.call("rename",{name:"unbound"})).value.error.code,"UNBOUND_SESSION");
+  assert.deepEqual(store.all("PRAGMA foreign_key_check"),[]);
 });

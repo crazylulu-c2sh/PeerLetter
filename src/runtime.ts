@@ -186,6 +186,14 @@ export class Runtime {
     catch { throw new MailError("WAKE_UNAVAILABLE", "Codex thread is unbound. Call whoami from Codex so request metadata binds it, or review /hooks and start a new session. You can also bind your own CODEX_THREAD_ID with peerletter_bind_session."); }
   }
 
+  rename(to: string) {
+    if (this.options.name || process.env.PEERLETTER_NAME) throw new MailError("NAME_CONFIGURED","Update PEERLETTER_NAME/--name before renaming a configured role mailbox.");
+    this.refresh();
+    if (!hasHostSession(this.actor.kind,this.actor.session_id,this.sessionSource)) throw new MailError("UNBOUND_SESSION","Renaming requires a bound host session; use PEERLETTER_NAME for a durable role name.");
+    const result = this.store.renameAgent(this.actor,to);
+    return { ...this.whoami(), rename: {from:result.from,requested:result.requested,name:result.agent.name,notified:result.notified} };
+  }
+
   whoami() {
     this.refresh();
     const bound = hasHostSession(this.actor.kind,this.actor.session_id,this.sessionSource);

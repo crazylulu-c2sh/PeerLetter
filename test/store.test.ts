@@ -221,3 +221,123 @@ test("workspace isolation, private files, crash presence and whole-thread retent
   assert.equal(a.status(sender,mail.id).state,"acknowledged"); a.prune(30,true);
   assert.throws(()=>a.status(sender,mail.id),code("MESSAGE_NOT_FOUND"));
 });
+
+test("rename moves mail, leases, wake state and live actor snapshots atomically",async t=>{
+  const {a,b,sender,receiver}=fixture(t);
+  const input={to:receiver.name,text:"incoming",idempotency_key:"incoming"};
+  const incoming=a.send(sender,input).message;
+  const outgoing=b.send(receiver,{to:sender.name,text:"outgoing",idempotency_key:"outgoing"}).message;
+  const snapshot={...receiver}, cli={name:receiver.name,session_id:receiver.session_id};
+  const lease=b.leaseClaim(receiver,["src/**"]),baseline=b.noticeBaseline(receiver);
+  const wake=b.beginCodexWake(receiver,[incoming],()=>"body-free")!;
+  b.pause(receiver.session_id,"manual");
+  const renamed=b.renameAgent(receiver,"claude-reviewer");
+  assert.equal(receiver.name,"claude-reviewer");assert.equal(renamed.agent.runtime_id,snapshot.runtime_id);
+  assert.equal(b.agent("receiver"),undefined);
+  assert.equal(b.peek(receiver).messages[0].id,incoming.id);
+  assert.equal(b.status(receiver,outgoing.id).from,"claude-reviewer");
+  const reply=a.send(sender,{to:"claude-reviewer",text:"reply",reply_to:outgoing.id,idempotency_key:"reply"}).message;
+  assert.equal(reply.thread_id,outgoing.thread_id);
+  assert.equal(b.leaseList()[0].owner,"claude-reviewer");assert.equal(b.leaseList()[0].id,lease.id);
+  assert.equal(b.noticeBaseline(receiver),baseline);
+  assert.equal(b.codexWake(receiver)?.agent_name,"claude-reviewer");
+  assert.equal(b.codexWake(receiver)?.client_message_id,wake.client_message_id);
+  assert.equal(b.gate(receiver.session_id).pause_reason,"manual");
+  assert.deepEqual(b.pendingNotices(snapshot,"test"),[]);assert.equal(snapshot.name,"claude-reviewer");
+  const duringSend={...snapshot,name:"receiver"};
+  b.markNotified(duringSend,"test",[incoming.id]);assert.equal(duringSend.name,"claude-reviewer");
+  assert.throws(()=>b.peek(cli),code("SESSION_CHANGED"));
+  assert.equal(a.send(sender,input).duplicate,true);
+  assert.throws(()=>a.send(sender,{...input,text:"changed"}),code("IDEMPOTENCY_CONFLICT"));
+  assert.throws(()=>a.send(sender,{...input,idempotency_key:"new"}),e=>code("PEER_RENAMED")(e) && (e as MailError).details !== undefined);
+  assert.equal((await b.receive(receiver)).messages.length,2);
+  b.ack(receiver,[incoming.id,reply.id]);assert.equal(b.peek(receiver).messages.length,0);
+  assert.deepEqual(b.all("PRAGMA foreign_key_check"),[]);
+});
+
+test("rename tombstones follow chains, allow reverting, and require explicit CLI reclaim",t=>{
+  const {a}=fixture(t);
+  const receiver=a.register({kind:"claude",session_id:randomUUID()});
+  const other=a.register({kind:"claude",session_id:randomUUID()});
+  a.renameAgent(receiver,"b");a.renameAgent(receiver,"c");
+  assert.equal(a.renamedTo("claude"),"claude-c");assert.equal(a.renamedTo("claude-b"),"claude-c");
+  assert.deepEqual(a.publicAgent(a.agent("claude-c")!).previous_names,["claude","claude-b"]);
+  assert.throws(()=>a.renameAgent(other,"claude"),code("NAME_RESERVED"));
+  a.renameAgent(receiver,"claude");
+  assert.equal(a.renamedTo("claude"),undefined);assert.equal(a.renamedTo("claude-c"),"claude");
+  assert.throws(()=>a.register({name:"claude-c",kind:"pi",session_id:randomUUID()}),code("NAME_RESERVED"));
+  assert.throws(()=>a.cliActor("claude-c"),code("NAME_RESERVED"));
+  const reclaimed=a.cliActor("claude-c",undefined,"cli",true);
+  assert.equal(reclaimed.name,"claude-c");assert.equal(a.renamedTo("claude-c"),undefined);
+  assert.deepEqual(a.all("PRAGMA foreign_key_check"),[]);
+});
+
+test("renamed automatic sessions reconnect and reserved base names are skipped",t=>{
+  const {a}=fixture(t);
+  for (const kind of ["codex","claude","pi"]) {
+    const session=randomUUID(),actor=a.register({kind,session_id:session});
+    assert.equal(actor.name,kind);
+    a.renameAgent(actor,`${kind}-review`);a.closeAgent(actor);
+    const other=a.register({kind,session_id:randomUUID()});assert.equal(other.name,`${kind}-2`);
+    const resumed=a.register({kind,session_id:session});assert.equal(resumed.name,`${kind}-review`);
+    assert.equal(a.publicAgent(resumed).naming,"automatic");
+  }
+  assert.deepEqual(a.all("PRAGMA foreign_key_check"),[]);
+});
+
+test("rename rejection preserves actor and mailbox state",t=>{
+  const {a,sender,receiver}=fixture(t);
+  a.cliActor("claude-offline");
+  a.register({name:"claude-online",kind:"claude",session_id:randomUUID()});
+  for (const [to,error] of [["offline","NAME_TAKEN"],["online","NAME_IN_USE"],["invalid name","INVALID_NAME"]]) {
+    assert.throws(()=>a.renameAgent(receiver,to),code(error));assert.equal(receiver.name,"receiver");
+  }
+  assert.throws(()=>a.renameAgent(receiver,"new",true),code("NAME_IN_USE"));
+  assert.equal(a.renameAgent(sender,"codex-sender").agent.name,"codex-sender");
+  assert.equal(a.renameAgent(sender,"sender").agent.name,"codex-sender");
+  assert.equal(a.agent("claude-new"),undefined);assert.ok(a.agent(sender.name));
+  assert.deepEqual(a.all("PRAGMA foreign_key_check"),[]);
+});
+
+test("rename fixes the kind prefix, validates both requested and final names, and permits bare-kind revert",t=>{
+  const {a}=fixture(t),actor=a.register({kind:"claude",session_id:randomUUID()});
+  assert.equal(a.renameAgent(actor,"hq").agent.name,"claude-hq");
+  assert.deepEqual(a.renameAgent(actor,"claude-hq").notified,[]);
+  assert.equal(a.renameAgent(actor,"codex-hq").agent.name,"claude-codex-hq");
+  assert.equal(a.renameAgent(actor,"claude").agent.name,"claude");
+  assert.equal(a.renameAgent(actor,"Claude-hq").agent.name,"claude-Claude-hq");
+  for(const name of ["bad name","x".repeat(65),"x".repeat(64)]) {
+    assert.throws(()=>a.renameAgent(actor,name),code("INVALID_NAME"));
+    assert.equal(actor.name,"claude-Claude-hq");
+  }
+  assert.equal(a.renameAgent(actor,"x".repeat(57)).agent.name.length,64);
+  const cli=a.cliActor("old");assert.equal(a.renameAgent(cli,"new",true).agent.name,"cli-new");
+  assert.deepEqual(a.all("PRAGMA foreign_key_check"),[]);
+});
+
+test("rename notices reach only current online senders once and no-op sends nothing",t=>{
+  const {a,sender,receiver}=fixture(t);
+  const offline=a.register({name:"offline",kind:"pi",session_id:randomUUID()});
+  const changed=a.register({name:"changed",kind:"pi",session_id:randomUUID()});
+  const stranger=a.register({name:"stranger",kind:"pi",session_id:randomUUID()});
+  const dead=a.register({name:"dead",kind:"pi",session_id:randomUUID(),pid:2147483000});
+  for(const [index,actor] of [sender,sender,offline,changed,dead].entries()) {
+    a.send(actor,{to:receiver.name,text:"prior",idempotency_key:`prior-${index}`});
+  }
+  a.closeAgent(offline);a.closeAgent(changed);
+  const replacement=a.register({name:"changed",kind:"pi",session_id:randomUUID()});
+  // Historical self-mail can exist after explicit role reuse; it must not generate a self-notice.
+  a.run(`INSERT INTO messages(id,from_name,from_session,to_name,thread_id,text,importance,idempotency_key,created_at)
+    VALUES(?,?,?,?,?,?,'normal',?,?)`,randomUUID(),receiver.name,receiver.session_id,receiver.name,randomUUID(),"history","self-history",Date.now());
+  const result=a.renameAgent(receiver,"hq");
+  assert.deepEqual(result.notified,[sender.name]);assert.equal(result.from,"receiver");assert.equal(result.requested,"hq");
+  const notice=a.peek(sender).messages;assert.equal(notice.length,1);
+  assert.equal(notice[0].from_name,"claude-hq");assert.equal(notice[0].from_session,receiver.session_id);
+  assert.equal(notice[0].text,"PeerLetter rename notice: receiver is now claude-hq. Send future mail to claude-hq; mail to receiver returns PEER_RENAMED. No reply needed.");
+  assert.equal(notice[0].importance,"normal");assert.equal(notice[0].reply_to,null);
+  assert.match(notice[0].idempotency_key,/^peerletter-rename:/);
+  for(const actor of [offline,replacement,stranger,dead]) assert.equal(a.peek(actor).messages.length,0);
+  const count=a.maxSequence();assert.deepEqual(a.renameAgent(receiver,"hq").notified,[]);
+  assert.equal(a.maxSequence(),count);
+  assert.deepEqual(a.all("PRAGMA foreign_key_check"),[]);
+});
