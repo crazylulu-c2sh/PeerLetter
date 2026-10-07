@@ -182,7 +182,11 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 - 이름 소유자가 살아 있으면 `NAME_IN_USE`, 같은 호스트 세션에 두 번째 연결이 살아 있으면 `SESSION_IN_USE`를 돌려줍니다.
 - 살아 있는 런타임의 소유권은 넘어가지 않습니다. 소유자 연결이 끊긴 뒤 도구를 다시 호출하면 등록할 수 있습니다.
 
-사용자가 요청하면 호스트 세션에 연결된 자동 이름 참여자는 `peerletter_rename({name: "reviewer"})`으로 이름을 바꿀 수 있습니다. 메일 이력·안 읽은 메일·답장·lease·wake 기준점·대기 중인 깨우기·세션 정지 상태를 유지하며, 같은 bound 세션으로 재연결하거나 resume하면 새 이름을 복구합니다. 호스트가 새 이름을 보여 주며 승인을 요구합니다. 피어 메일은 이름 변경을 승인할 수 없습니다. `PEERLETTER_NAME`/`--name` 설정이 있으면 `NAME_CONFIGURED`, unbound 세션이면 `UNBOUND_SESSION`입니다. 오래 유지할 역할 이름은 `PEERLETTER_NAME`을 쓰세요.
+사용자가 요청하면 호스트 세션에 연결된 자동 이름 참여자는 `peerletter_rename({name: "reviewer"})`으로 이름을 바꿀 수 있습니다(Claude의 최종 이름은 `claude-reviewer`). 메일 이력·안 읽은 메일·답장·lease·wake 기준점·대기 중인 깨우기·세션 정지 상태를 유지하며, 같은 bound 세션으로 재연결하거나 resume하면 새 이름을 복구합니다. 호스트가 새 이름을 보여 주며 승인을 요구합니다. 피어 메일은 이름 변경을 승인할 수 없습니다. `PEERLETTER_NAME`/`--name` 설정이 있으면 `NAME_CONFIGURED`, unbound 세션이면 `UNBOUND_SESSION`입니다. 오래 유지할 역할 이름은 `PEERLETTER_NAME`을 쓰세요.
+
+최종 이름은 항상 메일함의 에이전트 종류를 접두사로 가집니다(대소문자 구분). Claude에서 `hq`나 `claude-hq`를 요청하면 `claude-hq`, `codex-hq`를 요청하면 `claude-codex-hq`가 됩니다. `claude` 자체로 되돌리는 것도 가능합니다. CLI 종류의 오프라인 메일함에 `--to new`를 쓰면 `cli-new`가 됩니다. 요청 이름과 최종 이름 모두 유효한 64자 이하 이름이어야 합니다. 충돌·예약·변경 없음 검사는 최종 이름을 기준으로 합니다.
+
+이름 변경 시 이 메일함에 현재 세션에서 메일을 보낸 적이 있고 지금 온라인인 피어에게 일반 메일로 변경 알림을 보냅니다. 오프라인 피어, 세션이 바뀐 발신자, 메일을 보낸 적 없는 피어와 자기 자신은 제외합니다. 알림의 발신자는 새 이름이며, 옛 이름과 새 이름, 앞으로 사용할 주소, 옛 주소의 `PEER_RENAMED` 응답과 답장이 필요 없다는 안내를 담습니다. 이름 변경과 알림 저장은 한 트랜잭션에서 처리합니다. 최종 이름이 같으면 알림을 보내지 않습니다. 런타임과 CLI 결과의 `rename: {from, requested, name, notified}`는 변경 전 이름·요청 이름·최종 이름·알림을 저장한 수신자 목록을 보여 줍니다. `notified`는 전달이나 ACK 완료를 뜻하지 않습니다.
 
 옛 이름은 예약됩니다. 옛 이름으로 새 메일을 보내면 `PEER_RENAMED`와 `details.renamed_to`를 돌려줍니다. 안내된 새 이름으로 같은 idempotency key를 사용해 다시 보내세요. 변경 전에 보낸 메일의 정확한 재시도는 옛 이름으로도 가능합니다. 명시적 등록은 `NAME_RESERVED`로 실패하므로 설정을 새 이름으로 갱신하세요. 자동 할당도 예약 이름을 건너뜁니다. 연속 변경한 옛 이름은 최신 이름을 가리키며, 자기 예약 이름으로 되돌아갈 수 있습니다. CLI `--name OLD register`만 옛 이름을 의도적으로 되찾아 별도 메일함을 만듭니다. CLI `--name OLD rename --to NEW`는 오프라인 메일함을 변경하며, 온라인 참여자는 자기 세션의 MCP 도구를 써야 합니다. 기존 메일함과 병합하지 않으므로 오프라인 이름 충돌은 `NAME_TAKEN`, 온라인 충돌은 `NAME_IN_USE`입니다. 예전 체크아웃은 새 rename 테이블을 무시하므로 예약 이름을 재할당하거나 옛 이름에 `PEER_NOT_FOUND`를 반환할 수 있습니다. 모든 클라이언트를 업데이트한 뒤 사용하세요.
 

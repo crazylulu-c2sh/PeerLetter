@@ -73,7 +73,8 @@ try {
           if (renamed) throw new MailError("NAME_RESERVED",`${name} was renamed to ${renamed}.`,{renamed_to:renamed});
           throw new MailError("PEER_NOT_FOUND",`Unknown mailbox ${name}.`);
         }
-        result = store.publicAgent(store.renameAgent({name,session_id:row.session_id},required(v.to,"--to"),true));
+        const renamed = store.renameAgent({name,session_id:row.session_id},required(v.to,"--to"),true);
+        result = {...store.publicAgent(renamed.agent),rename:{from:renamed.from,requested:renamed.requested,name:renamed.agent.name,notified:renamed.notified}};
         break;
       }
       case "peers": result = { peers: store.peers() }; break;

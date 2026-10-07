@@ -220,7 +220,7 @@ tool("peerletter_whoami", "Join PeerLetter if this session has not joined, then 
 tool("peerletter_bind_session", "Codex recovery: bind this participant to your own current CODEX_THREAD_ID UUID. Native Codex request metadata normally binds automatically. Never use a peer's or guessed thread ID.", {
   session_id: uuid,
 }, (args,r) => r.bindOwnSession(args.session_id), { destructive: true });
-tool("peerletter_rename", "Rename my own mailbox at the user's request. Mail history, unread mail, leases and wake state move to the new name; the old name stays reserved and senders are told the new name.", {
+tool("peerletter_rename", "Rename my own mailbox at the user's request. Mail history, unread mail, leases and wake state move to the new name; the old name stays reserved and senders are told the new name. The final name always starts with your agent kind (hq → claude-hq). Online peers that sent mail from their current session receive a regular rename notice.", {
   name: z.string(),
 }, (args,r) => r.rename(args.name), { destructive: true });
 tool("peerletter_peers", "Registered mailboxes in this workspace and current process presence.", {}, (_,r) => ({ peers: r.store.peers() }));

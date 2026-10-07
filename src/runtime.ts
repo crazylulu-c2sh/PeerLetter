@@ -190,8 +190,8 @@ export class Runtime {
     if (this.options.name || process.env.PEERLETTER_NAME) throw new MailError("NAME_CONFIGURED","Update PEERLETTER_NAME/--name before renaming a configured role mailbox.");
     this.refresh();
     if (!hasHostSession(this.actor.kind,this.actor.session_id,this.sessionSource)) throw new MailError("UNBOUND_SESSION","Renaming requires a bound host session; use PEERLETTER_NAME for a durable role name.");
-    this.store.renameAgent(this.actor,to);
-    return this.whoami();
+    const result = this.store.renameAgent(this.actor,to);
+    return { ...this.whoami(), rename: {from:result.from,requested:result.requested,name:result.agent.name,notified:result.notified} };
   }
 
   whoami() {

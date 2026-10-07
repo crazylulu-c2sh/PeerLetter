@@ -155,12 +155,15 @@ export class Store {
     return this.get<{new_name:string}>("SELECT new_name FROM agent_renames WHERE old_name=?",name)?.new_name;
   }
 
-  renameAgent(actor: Actor, to: string, offlineOnly = false): Agent {
+  renameAgent(actor: Actor, to: string, offlineOnly = false): { agent: Agent; from: string; requested: string; notified: string[] } {
     validName(to);
+    const requested = to;
     const renamed = this.transaction(() => {
       this.cleanPresence();
       const current = this.assertActor(actor);
-      if (to === actor.name) return current;
+      to = to === current.kind || to.startsWith(current.kind + "-") ? to : `${current.kind}-${to}`;
+      validName(to);
+      if (to === actor.name) return {agent:current,from:actor.name,requested,notified:[]};
       if (offlineOnly && current.online) throw new MailError("NAME_IN_USE","Mailbox is online; use peerletter_rename in that session.");
       const target = this.agent(to);
       if (target) throw new MailError(target.online ? "NAME_IN_USE" : "NAME_TAKEN",`Mailbox ${to} already exists; mailboxes cannot be merged.`);
@@ -174,9 +177,16 @@ export class Store {
       }
       this.run("UPDATE agent_renames SET new_name=? WHERE new_name=?",to,old);
       this.run("INSERT OR REPLACE INTO agent_renames VALUES(?,?,?)",old,to,Date.now());
-      return this.agent(to)!;
+      const notified = this.all<{name:string}>(`SELECT DISTINCT a.name FROM messages m
+        JOIN agents a ON a.name=m.from_name AND a.session_id=m.from_session
+        WHERE m.to_name=? AND a.online=1 AND a.name<>? ORDER BY a.name`,to,to).map(a=>a.name);
+      for (const name of notified) this.insertMessage({name:to,session_id:actor.session_id}, {
+        to:name, text:`PeerLetter rename notice: ${old} is now ${to}. Send future mail to ${to}; mail to ${old} returns PEER_RENAMED. No reply needed.`,
+        idempotency_key:`peerletter-rename:${randomUUID()}`,
+      },randomUUID(),"normal");
+      return {agent:this.agent(to)!,from:old,requested,notified};
     });
-    actor.name = renamed.name;
+    actor.name = renamed.agent.name;
     return renamed;
   }
 
@@ -454,13 +464,18 @@ export class Store {
         return { message: previous, duplicate: true };
       }
       if (input.to_session && recipient.session_id !== input.to_session) throw new MailError("SESSION_CHANGED", "Recipient is registered under another session ID.");
-      const id = randomUUID();
-      this.run(`INSERT INTO messages(id,from_name,from_session,to_name,to_session,thread_id,reply_to,text,importance,idempotency_key,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, actor.name, actor.session_id, input.to, input.to_session || null,
-        thread, input.reply_to || null, input.text, importance, input.idempotency_key, Date.now());
-      this.run("INSERT INTO deliveries(message_id,state) VALUES(?,'accepted')", id);
-      return { message: this.get<Mail>(mailSelect + " WHERE m.id=?", id)!, duplicate: false };
+      return { message: this.insertMessage(actor,{...input,to},thread,importance), duplicate: false };
     });
+  }
+
+  // Call only inside an existing transaction so rename notices and normal mail commit atomically.
+  private insertMessage(actor: Actor, input: SendInput, thread: string, importance: "normal" | "high"): Mail {
+    const id = randomUUID();
+    this.run(`INSERT INTO messages(id,from_name,from_session,to_name,to_session,thread_id,reply_to,text,importance,idempotency_key,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, actor.name, actor.session_id, input.to, input.to_session || null,
+      thread, input.reply_to || null, input.text, importance, input.idempotency_key, Date.now());
+    this.run("INSERT INTO deliveries(message_id,state) VALUES(?,'accepted')", id);
+    return this.get<Mail>(mailSelect + " WHERE m.id=?", id)!;
   }
 
   peek(actor: Actor, options: { after_id?: string; limit?: number } = {}) {
