@@ -24,7 +24,7 @@
     "zod": "3.25.76"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.99.2",
+    "@earendil-works/pi-coding-agent": "1.0.2",
     "@types/node": "24.10.1",
     "@types/ws": "8.18.2",
     "typescript": "5.9.3"
