@@ -203,8 +203,9 @@ function tool(name: string, description: string, schema: z.ZodRawShape, fn: (arg
     annotations: { readOnlyHint: false, destructiveHint: hints.destructive ?? false, idempotentHint: hints.idempotent ?? true, openWorldHint: false } },
   async (args, extra) => {
     try {
-      await callingProject(extra._meta,name === "peerletter_bind_session" ? args.session_id : undefined);
-      const r = current(extra._meta,name === "peerletter_bind_session" ? args.session_id : undefined);
+      const recovery = name === "peerletter_bind_session" && typeof args.session_id === "string" ? args.session_id : undefined;
+      await callingProject(extra._meta,recovery);
+      const r = current(extra._meta,recovery);
       const result = await fn(args, r, AbortSignal.any([extra.signal, stopped.signal]));
       if (codexQueue && (name === "peerletter_receive" || name === "peerletter_ack")) {
         // Withdraw obsolete pending wake before returning a successful mailbox operation.
