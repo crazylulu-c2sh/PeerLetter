@@ -141,7 +141,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 - 초기화나 `tools/list`만으로는 이름을 예약하지 않고 감시도 시작하지 않습니다. 호스트 세션 ID를 알고 있어도 마찬가지입니다.
 - 그래서 쓰지 않는 수동 클라이언트, 불러오기만 한 thread, 서브에이전트가 참여자로 나타나지 않습니다.
 - 아직 참여하지 않은 세션도 훅은 문제없이 처리합니다.
-- MCP 안내문은 사용자가 PeerLetter를 요청했거나 이 세션이 이미 참여 중일 때만 도구를 호출하라고 지시합니다. 어떤 호출이든 참여로 이어지기 때문입니다. 같은 이유로 읽기 전용(read-only)으로 표시한 도구는 없습니다. Codex 같은 호스트는 destructive 도구를 호출할 때마다 승인을 요구하므로, destructive로 표시한 도구는 `peerletter_bind_session` 하나뿐입니다. 이 도구는 모델이 넘긴 thread ID에 참여자를 연결하며, 사용자는 승인 전에 그 ID를 보게 됩니다. 나머지 도구는 참여자 자신의 PeerLetter 기록만 바꾸므로 승인을 요구하지 않습니다.
+- MCP 안내문은 사용자가 PeerLetter를 요청했거나 이 세션이 이미 참여 중일 때만 도구를 호출하라고 지시합니다. 어떤 호출이든 참여로 이어지기 때문입니다. 같은 이유로 읽기 전용(read-only)으로 표시한 도구는 없습니다. Codex 같은 호스트는 destructive 도구를 호출할 때마다 승인을 요구하므로, destructive로 표시한 도구는 `peerletter_bind_session`과 `peerletter_rename`입니다. 이 도구들은 모델이 넘긴 thread ID 또는 메일함 이름에 참여자를 연결하며, 사용자는 승인 전에 그 값을 보게 됩니다. 나머지 도구는 참여자 자신의 PeerLetter 기록만 바꾸므로 승인을 요구하지 않습니다.
 - PeerLetter를 사용한 적 없는 작업 공간에서는 훅, Claude monitor·async-rewake 대기 프로세스, Pi 확장이 아무것도 기록하지 않고 DB도 만들지 않습니다. 첫 PeerLetter 호출이 DB를 만든 뒤에 붙습니다.
 
 **깨우기를 켜면 다르게 동작합니다.** 실제 호스트 세션을 알 수 있고 **PeerLetter를 사용한 적이 있는** 연결은 MCP 초기화 직후 참여하고, **도구 호출 없이** 깨우기 장치를 시작합니다.
@@ -182,8 +182,13 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 - 이름 소유자가 살아 있으면 `NAME_IN_USE`, 같은 호스트 세션에 두 번째 연결이 살아 있으면 `SESSION_IN_USE`를 돌려줍니다.
 - 살아 있는 런타임의 소유권은 넘어가지 않습니다. 소유자 연결이 끊긴 뒤 도구를 다시 호출하면 등록할 수 있습니다.
 
+사용자가 요청하면 호스트 세션에 연결된 자동 이름 참여자는 `peerletter_rename({name: "reviewer"})`으로 이름을 바꿀 수 있습니다. 메일 이력·안 읽은 메일·답장·lease·wake 기준점·대기 중인 깨우기·세션 정지 상태를 유지하며, 같은 bound 세션으로 재연결하거나 resume하면 새 이름을 복구합니다. 호스트가 새 이름을 보여 주며 승인을 요구합니다. 피어 메일은 이름 변경을 승인할 수 없습니다. `PEERLETTER_NAME`/`--name` 설정이 있으면 `NAME_CONFIGURED`, unbound 세션이면 `UNBOUND_SESSION`입니다. 오래 유지할 역할 이름은 `PEERLETTER_NAME`을 쓰세요.
+
+옛 이름은 예약됩니다. 옛 이름으로 새 메일을 보내면 `PEER_RENAMED`와 `details.renamed_to`를 돌려줍니다. 안내된 새 이름으로 같은 idempotency key를 사용해 다시 보내세요. 변경 전에 보낸 메일의 정확한 재시도는 옛 이름으로도 가능합니다. 명시적 등록은 `NAME_RESERVED`로 실패하므로 설정을 새 이름으로 갱신하세요. 자동 할당도 예약 이름을 건너뜁니다. 연속 변경한 옛 이름은 최신 이름을 가리키며, 자기 예약 이름으로 되돌아갈 수 있습니다. CLI `--name OLD register`만 옛 이름을 의도적으로 되찾아 별도 메일함을 만듭니다. CLI `--name OLD rename --to NEW`는 오프라인 메일함을 변경하며, 온라인 참여자는 자기 세션의 MCP 도구를 써야 합니다. 기존 메일함과 병합하지 않으므로 오프라인 이름 충돌은 `NAME_TAKEN`, 온라인 충돌은 `NAME_IN_USE`입니다. 예전 체크아웃은 새 rename 테이블을 무시하므로 예약 이름을 재할당하거나 옛 이름에 `PEER_NOT_FOUND`를 반환할 수 있습니다. 모든 클라이언트를 업데이트한 뒤 사용하세요.
+
 **`whoami`와 `peers`가 보여 주는 정보**
-- `naming`: `automatic`, `explicit`, `legacy` 중 하나입니다.
+- `naming`: `automatic`, `explicit`, `legacy` 중 하나입니다. `automatic`은 자동 할당이나 rename 여부와 관계없이 호스트 세션 소유를 뜻합니다.
+- `previous_names`: 현재 이름으로 연결된 예약된 옛 이름 목록입니다.
 - `session_binding`: `bound` 또는 `unbound`와 그 출처입니다.
 - `online`: 등록된 MCP 프로세스가 살아 있다는 뜻입니다. TUI가 붙어 있거나 메일을 읽는다는 뜻은 아닙니다.
 - 기존 `legacy` 메일함은 그대로 남고, 관계없는 세션에 자동으로 다시 배정되지 않습니다. 업데이트한 뒤에는 이전 MCP 프로세스를 다시 연결해야 이 등록 정책이 적용됩니다.
@@ -206,7 +211,7 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project --apply
 
 **기본 thread 메타데이터를 보내지 않는 예전 클라이언트**
 - 에이전트의 셸에서 **자기** `CODEX_THREAD_ID`를 읽은 뒤 `peerletter_bind_session({session_id: "<그 전체 UUID>"})`를 호출합니다.
-- destructive로 표시한 도구는 이것 하나뿐이라, Codex가 ID를 보여 주며 승인을 묻습니다. 자기 thread ID일 때만 승인하세요. `approval_policy = "never"`에서는 호출이 거부됩니다.
+- rename과 마찬가지로 destructive로 표시한 도구라, Codex가 ID를 보여 주며 승인을 묻습니다. 자기 thread ID일 때만 승인하세요. `approval_policy = "never"`에서는 호출이 거부됩니다.
 - 또는 `/hooks`를 검토하고 새 세션을 시작해 SessionStart가 연결하게 합니다.
 - 최근 rollout, 다른 참여자의 ID, 추측한 ID는 절대 쓰지 마세요.
 - 기본 메타데이터로 thread가 이미 연결됐더라도 Stop과 Interrupt 훅은 여전히 호스트 검토가 필요합니다.
@@ -282,6 +287,8 @@ node /path/to/PeerLetter/src/cli.ts --project /path/to/project watch
 node /path/to/PeerLetter/src/cli.ts --project /path/to/project \
   --session <CLAUDE_SESSION_UUID> --name <EXACT_NAME> watch
 ```
+
+이름을 바꾸면 `--name`으로 고정한 watch는 `SESSION_MISMATCH`로 종료합니다. 새 이름으로 다시 실행하세요.
 
 **`watch` 동작**
 - 자기 호스트의 현재 registry·세션 환경 변수 또는 명시적 UUID가 필요합니다. 설치된 2.1.287의 monitor는 현재 세션 ID를 내보내는 셸 실행기를 씁니다.
@@ -478,6 +485,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 | 도구 | 용도 |
 |---|---|
 | `peerletter_whoami`, `peerletter_peers` | 이름, 세션, 작업 공간, 온라인 여부, 깨우기 상태, 이름 정책, 세션 연결 |
+| `peerletter_rename` | 사용자 요청으로 자기 bound 자동 메일함 이름 변경. 메일·wake 상태 유지, 옛 이름 예약, 호스트 승인 필요 |
 | `peerletter_bind_session` | 기본 메타데이터가 없는 Codex 클라이언트의 복구용. 이 참여자를 자기 현재 thread의 전체 UUID에만 연결 |
 | `peerletter_send` | `to`, `text`, 필수 `idempotency_key`. 선택: 전체 UUID `reply_to`, `thread_id`, `to_session`, `importance` |
 | `peerletter_receive`, `peerletter_peek` | 미확인 메시지 최대 20건. 중요도, 그다음 접수 순서. 선택형 커서 |

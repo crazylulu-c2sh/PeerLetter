@@ -56,6 +56,8 @@ ${quoteShell(cli)} --name codex-review status <MESSAGE_UUID>
 
 송신→수신 상태는 accepted→delivered→acknowledged입니다. receive는 ACK하지 않습니다. 같은 키로 재송신하면 기존 메시지를 반환합니다.
 
+오프라인 메일함은 --name OLD rename --to NEW로 바꾸세요. bound 자동 이름 세션은 사용자가 요청할 때 peerletter_rename으로 변경하며 호스트 승인이 필요합니다. 메일과 깨우기 상태를 유지하고 옛 이름은 예약됩니다.
+
 ## 새 세션에서 MCP 연결
 
 \`\`\`bash

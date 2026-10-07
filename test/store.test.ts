@@ -207,3 +207,76 @@ test("workspace isolation, private files, crash presence and whole-thread retent
   assert.equal(a.status(sender,mail.id).state,"acknowledged"); a.prune(30,true);
   assert.throws(()=>a.status(sender,mail.id),code("MESSAGE_NOT_FOUND"));
 });
+
+test("rename moves mail, leases, wake state and live actor snapshots atomically",async t=>{
+  const {a,b,sender,receiver}=fixture(t);
+  const input={to:receiver.name,text:"incoming",idempotency_key:"incoming"};
+  const incoming=a.send(sender,input).message;
+  const outgoing=b.send(receiver,{to:sender.name,text:"outgoing",idempotency_key:"outgoing"}).message;
+  const snapshot={...receiver}, cli={name:receiver.name,session_id:receiver.session_id};
+  const lease=b.leaseClaim(receiver,["src/**"]),baseline=b.noticeBaseline(receiver);
+  const wake=b.beginCodexWake(receiver,[incoming],()=>"body-free")!;
+  b.pause(receiver.session_id,"manual");
+  const renamed=b.renameAgent(receiver,"reviewer");
+  assert.equal(receiver.name,"reviewer");assert.equal(renamed.runtime_id,snapshot.runtime_id);
+  assert.equal(b.agent("receiver"),undefined);
+  assert.equal(b.peek(receiver).messages[0].id,incoming.id);
+  assert.equal(b.status(receiver,outgoing.id).from,"reviewer");
+  const reply=a.send(sender,{to:"reviewer",text:"reply",reply_to:outgoing.id,idempotency_key:"reply"}).message;
+  assert.equal(reply.thread_id,outgoing.thread_id);
+  assert.equal(b.leaseList()[0].owner,"reviewer");assert.equal(b.leaseList()[0].id,lease.id);
+  assert.equal(b.noticeBaseline(receiver),baseline);
+  assert.equal(b.codexWake(receiver)?.agent_name,"reviewer");
+  assert.equal(b.codexWake(receiver)?.client_message_id,wake.client_message_id);
+  assert.equal(b.gate(receiver.session_id).pause_reason,"manual");
+  assert.deepEqual(b.pendingNotices(snapshot,"test"),[]);assert.equal(snapshot.name,"reviewer");
+  const duringSend={...snapshot,name:"receiver"};
+  b.markNotified(duringSend,"test",[incoming.id]);assert.equal(duringSend.name,"reviewer");
+  assert.throws(()=>b.peek(cli),code("SESSION_CHANGED"));
+  assert.equal(a.send(sender,input).duplicate,true);
+  assert.throws(()=>a.send(sender,{...input,text:"changed"}),code("IDEMPOTENCY_CONFLICT"));
+  assert.throws(()=>a.send(sender,{...input,idempotency_key:"new"}),e=>code("PEER_RENAMED")(e) && (e as MailError).details !== undefined);
+  assert.equal((await b.receive(receiver)).messages.length,2);
+  b.ack(receiver,[incoming.id,reply.id]);assert.equal(b.peek(receiver).messages.length,0);
+  assert.deepEqual(b.all("PRAGMA foreign_key_check"),[]);
+});
+
+test("rename tombstones follow chains, allow reverting, and require explicit CLI reclaim",t=>{
+  const {a,sender,receiver}=fixture(t);
+  a.renameAgent(receiver,"b");a.renameAgent(receiver,"c");
+  assert.equal(a.renamedTo("receiver"),"c");assert.equal(a.renamedTo("b"),"c");
+  assert.deepEqual(a.publicAgent(a.agent("c")!).previous_names,["b","receiver"]);
+  assert.throws(()=>a.renameAgent(sender,"receiver"),code("NAME_RESERVED"));
+  a.renameAgent(receiver,"receiver");
+  assert.equal(a.renamedTo("receiver"),undefined);assert.equal(a.renamedTo("c"),"receiver");
+  assert.throws(()=>a.register({name:"c",kind:"pi",session_id:randomUUID()}),code("NAME_RESERVED"));
+  assert.throws(()=>a.cliActor("c"),code("NAME_RESERVED"));
+  const reclaimed=a.cliActor("c",undefined,"cli",true);
+  assert.equal(reclaimed.name,"c");assert.equal(a.renamedTo("c"),undefined);
+  assert.deepEqual(a.all("PRAGMA foreign_key_check"),[]);
+});
+
+test("renamed automatic sessions reconnect and reserved base names are skipped",t=>{
+  const {a}=fixture(t);
+  for (const kind of ["codex","claude","pi"]) {
+    const session=randomUUID(),actor=a.register({kind,session_id:session});
+    assert.equal(actor.name,kind);
+    a.renameAgent(actor,`${kind}-review`);a.closeAgent(actor);
+    const other=a.register({kind,session_id:randomUUID()});assert.equal(other.name,`${kind}-2`);
+    const resumed=a.register({kind,session_id:session});assert.equal(resumed.name,`${kind}-review`);
+    assert.equal(a.publicAgent(resumed).naming,"automatic");
+  }
+  assert.deepEqual(a.all("PRAGMA foreign_key_check"),[]);
+});
+
+test("rename rejection preserves actor and mailbox state",t=>{
+  const {a,sender,receiver}=fixture(t);
+  a.cliActor("offline");
+  for (const [to,error] of [["offline","NAME_TAKEN"],["sender","NAME_IN_USE"],["invalid name","INVALID_NAME"]]) {
+    assert.throws(()=>a.renameAgent(receiver,to),code(error));assert.equal(receiver.name,"receiver");
+  }
+  assert.throws(()=>a.renameAgent(receiver,"new",true),code("NAME_IN_USE"));
+  assert.equal(a.renameAgent(receiver,"receiver").name,"receiver");
+  assert.equal(a.agent("new"),undefined);assert.ok(a.agent(sender.name));
+  assert.deepEqual(a.all("PRAGMA foreign_key_check"),[]);
+});

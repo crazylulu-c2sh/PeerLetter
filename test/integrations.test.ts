@@ -168,7 +168,7 @@ function piRig(t:test.TestContext,project:string,state:string) {
   async function start(reason:string,session:string) {
     await handlers.get("session_start")!({reason},ctx(session));
     const connection=connections.at(-1)!;await connection.ready;
-    assert.equal((await connection.sdk.listTools()).tools.length,11);
+    assert.equal((await connection.sdk.listTools()).tools.length,12);
     return connection.sdk;
   }
   async function call(sdk:Client,tool:string,args:Record<string,unknown>={}) {
@@ -281,4 +281,23 @@ test("Stop and mid-turn hooks tolerate sessions that never joined PeerLetter",t=
     assert.equal(output,"");
   }
   assert.equal(store.peers().length,0);
+});
+
+test("prepared CLI wrapper renames offline mailboxes and intentionally reclaims old names",t=>{
+  const {root,project}=temp(t),output=path.join(root,"prepared"),state=path.join(root,"state");
+  const env={...process.env,PEERLETTER_STATE_DIR:state};
+  execFileSync(process.execPath,[path.join(repo,"scripts/prepare.ts"),"--project",project,"--output",output],{env});
+  const wrapper=path.join(output,"peerletter");
+  const run=(...args:string[])=>JSON.parse(execFileSync(wrapper,args,{env,encoding:"utf8",stdio:["pipe","pipe","pipe"]}));
+  run("--name","sender","register");run("--name","old","register");
+  const mail=run("--name","sender","send","--to","old","--text","task","--idempotency-key","task").message;
+  const renamed=run("--name","old","rename","--to","new");assert.equal(renamed.name,"new");assert.deepEqual(renamed.previous_names,["old"]);
+  assert.ok(run("peers").peers.some((p:any)=>p.name==="new" && p.previous_names[0]==="old"));
+  const failure=(...args:string[])=>{try {run(...args);assert.fail("Expected CLI error");} catch(e:any) {return JSON.parse(String(e.stderr)).error;}};
+  assert.equal(failure("--name","old","peek").code,"NAME_RESERVED");
+  const error=failure("--name","sender","send","--to","old","--text","new task","--idempotency-key","fresh");
+  assert.equal(error.code,"PEER_RENAMED");assert.equal(error.details.renamed_to,"new");
+  assert.equal(run("--name","new","receive").messages[0].id,mail.id);
+  run("--name","new","ack",mail.id);assert.equal(run("--name","new","peek").messages.length,0);
+  assert.equal(run("--name","old","register").name,"old");assert.equal(run("--name","old","peek").messages.length,0);
 });
