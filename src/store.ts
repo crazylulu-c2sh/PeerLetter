@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { MailError, boundedInt, validName, validUuid, validSession } from "./errors.ts";
-import { isProcessAlive, processInfo } from "./process.ts";
+import { isProcessAlive, isProcessStopped, processInfo } from "./process.ts";
 import type { Project } from "./project.ts";
 
 export interface Actor { name: string; session_id: string; runtime_id?: string }
@@ -201,7 +201,12 @@ export class Store {
 
   private cleanPresence(): void {
     for (const row of this.all<Agent>("SELECT * FROM agents WHERE online=1")) {
-      if (!isProcessAlive(row.pid, row.proc_start)) this.run("UPDATE agents SET online=0 WHERE name=? AND runtime_id=?", row.name, row.runtime_id);
+      const stoppedRuntime = isProcessStopped(row.pid, row.proc_start);
+      const stoppedHost = isProcessStopped(row.host_pid, row.host_start);
+      if (stoppedRuntime || stoppedHost) {
+        // Fence a resumed runtime even when the replacement chooses another name.
+        this.run("UPDATE agents SET online=0,runtime_id=? WHERE name=? AND runtime_id=?", randomUUID(), row.name, row.runtime_id);
+      } else if (!isProcessAlive(row.pid, row.proc_start)) this.run("UPDATE agents SET online=0 WHERE name=? AND runtime_id=?", row.name, row.runtime_id);
     }
   }
 
@@ -223,7 +228,7 @@ export class Store {
 
   private assertSessionAvailable(kind: string, session: string, exceptName = ""): void {
     const owner = this.get<Agent>("SELECT * FROM agents WHERE kind=? AND session_id=? AND online=1 AND name<>? LIMIT 1",kind,session,exceptName);
-    if (owner) throw new MailError("SESSION_IN_USE",`Host session is already owned by online agent ${owner.name}; close that MCP connection before reconnecting.`);
+    if (owner) throw new MailError("SESSION_IN_USE",`Host session is already owned by online agent ${owner.name} (pid=${owner.pid}, state=${owner.pid ? processInfo(owner.pid)?.state || "unknown" : "unknown"}, host_pid=${owner.host_pid}, host_state=${owner.host_pid ? processInfo(owner.host_pid)?.state || "unknown" : "unknown"}, last_seen=${owner.last_seen}); close that MCP connection before reconnecting.`);
   }
 
   register(input: { name?: string; kind: string; session_id: string; pid?: number; host_pid?: number; wake?: string; session_source?: string; replace?: Agent }): Agent {

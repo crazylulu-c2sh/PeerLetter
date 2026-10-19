@@ -24,6 +24,13 @@ export function isProcessAlive(pid: number | null, start: string | null): boolea
   return !!info && info.state !== "Z" && info.state !== "X" && (!start || info.start === start);
 }
 
+// Stopped processes still exist, but cannot service a session or retain presence.
+export function isProcessStopped(pid: number | null, start: string | null): boolean {
+  if (!pid) return false;
+  const info = processInfo(pid);
+  return !!info && (info.state === "T" || info.state === "t") && (!start || info.start === start);
+}
+
 export function ancestors(pid = process.ppid): ProcessInfo[] {
   const list: ProcessInfo[] = [];
   const seen = new Set<number>();

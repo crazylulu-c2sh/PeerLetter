@@ -4,6 +4,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
+import { processInfo } from "../src/process.ts";
 import { Store } from "../src/store.ts";
 import { resolveProject } from "../src/project.ts";
 import { MailError } from "../src/errors.ts";
@@ -20,6 +24,42 @@ function fixture(t: test.TestContext) {
   return {a,b,sender,receiver,root,project};
 }
 const code = (wanted: string) => (error: unknown) => error instanceof MailError && error.code === wanted;
+
+for (const stopped of ["runtime", "host"] as const) {
+  for (const explicit of [false, true]) {
+    test(`stopped ${stopped} releases presence and fences resumed owner (${explicit ? "different name" : "same name"})`, {skip:process.platform !== "linux"}, async t=>{
+      const {a,b}=fixture(t);
+      const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});
+      t.after(async ()=>{ const exited=once(child,"exit"); child.kill("SIGKILL"); await exited; });
+      await once(child,"spawn");
+      const session=randomUUID();
+      const old=a.register({kind:"claude",session_id:session,
+        ...(stopped === "runtime" ? {pid:child.pid!} : {host_pid:child.pid!}),
+        ...(explicit ? {name:"old-owner"} : {})});
+      assert.throws(()=>b.register({kind:"claude",session_id:session}),error=>{
+        assert.ok(code("SESSION_IN_USE")(error));
+        assert.match((error as Error).message,/pid=\d+, state=\w.*last_seen=\d+/);
+        return true;
+      });
+      child.kill("SIGSTOP");
+      for (let i=0; !["T","t"].includes(processInfo(child.pid!)?.state || ""); i++) {
+        assert.ok(i<200,"child should stop"); await delay(10);
+      }
+      assert.equal(b.peers().find(p=>p.name===old.name)?.online,false);
+      const next=b.register({kind:"claude",session_id:session,...(explicit ? {name:"new-owner"} : {})});
+      assert.equal(next.name===old.name,!explicit);
+      child.kill("SIGCONT");
+      for (let i=0; ["T","t"].includes(processInfo(child.pid!)?.state || ""); i++) {
+        assert.ok(i<200,"child should continue"); await delay(10);
+      }
+      assert.throws(()=>a.touch(old),code("SESSION_CHANGED"));
+      assert.throws(()=>a.send(old,{to:"sender",text:"stale",idempotency_key:"stale"}),code("SESSION_CHANGED"));
+      a.closeAgent(old);
+      b.touch(next);
+      assert.equal(b.agent(next.name)?.online,1);
+    });
+  }
+}
 
 test("durable send, full UUID replies, atomic ACK and idempotency",async t=>{
   const {a,b,sender,receiver} = fixture(t);
