@@ -10,6 +10,7 @@ import { resolveProject } from "../src/project.ts";
 import { CodexQueue, CodexConnection } from "../src/codex.ts";
 import { MailWatcher } from "../src/wake.ts";
 import { codexDaemon } from "./codex-fixture.ts";
+import { stoppableChild } from "./process-fixture.ts";
 
 function fixture(t: test.TestContext) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-codex-")),project=path.join(root,"project"),state=path.join(root,"state");fs.mkdirSync(project);
@@ -38,6 +39,34 @@ function fixture(t: test.TestContext) {
   t.after(async()=>{await watcher.stop();queue.close();store.close();fs.rmSync(root,{recursive:true,force:true});});
   return {root,project,state,store,actor,sender,rpc,queue,watcher,mail};
 }
+
+for (const edited of [false,true]) test(`Codex takeover reconciles the previous mailbox's queued wake (${edited ? "user edited" : "unchanged"})`,{skip:process.platform !== "linux"},async t=>{
+  const f=fixture(t),child=await stoppableChild(t),session=randomUUID();
+  const old=f.store.register({name:"old-owner",kind:"codex",session_id:session,pid:child.pid,wake:"codex-queue"});
+  const oldQueue=new CodexQueue(f.store,old,()=>session,f.rpc);
+  const mail=f.store.send(f.sender,{to:old.name,text:"old private",idempotency_key:"old"}).message;
+  f.rpc.status="idle";f.rpc.beforeRead=async()=>{};
+  // This fixture's thread/read normally returns its original actor's session.
+  const originalCall=f.rpc.call.bind(f.rpc);
+  f.rpc.call=async(method,params)=>method === "thread/read" ? {thread:{id:session,status:{type:"idle"}}} : originalCall(method,params);
+  await oldQueue.signal([mail]);
+  const intent=f.store.codexWake(old)!;assert.ok(intent.queue_id);
+  if (edited) f.rpc.queued[0].input[0].text="User edited this queued input";
+  await child.signal("SIGSTOP");
+  const next=f.store.register({name:"new-owner",kind:"codex",session_id:session,wake:"codex-queue"});
+  const queue=new CodexQueue(f.store,next,()=>session,f.rpc);
+  assert.equal(f.store.codexWake(next)?.client_message_id,intent.client_message_id,"Keep external queue ownership so it can be reconciled");
+  if (edited) await assert.rejects(queue.reconcile(),/edited/);
+  else await queue.reconcile();
+  assert.equal(f.store.codexWake(next),undefined);
+  assert.equal(f.rpc.queued.length,edited ? 1 : 0);
+  const fresh=f.store.send(f.sender,{to:next.name,text:"new private",idempotency_key:"new"}).message;
+  await queue.signal([fresh]);
+  assert.equal(f.store.codexWake(next)?.agent_name,next.name);
+  assert.equal(f.rpc.queued.length,edited ? 2 : 1);
+  await child.signal("SIGCONT");
+  assert.throws(()=>f.store.clearCodexWake(old,intent.client_message_id,true),/no longer owns/);
+});
 
 test("busy N mail read and ACK produces no queued wake; unread mail wakes once after idle",async t=>{
   const f=fixture(t),mails=Array.from({length:5},()=>f.mail());

@@ -4,10 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { setTimeout as delay } from "node:timers/promises";
-import { processInfo } from "../src/process.ts";
+import { stoppableChild } from "./process-fixture.ts";
 import { Store } from "../src/store.ts";
 import { resolveProject } from "../src/project.ts";
 import { MailError } from "../src/errors.ts";
@@ -24,22 +21,6 @@ function fixture(t: test.TestContext) {
   return {a,b,sender,receiver,root,project};
 }
 const code = (wanted: string) => (error: unknown) => error instanceof MailError && error.code === wanted;
-
-async function stoppableChild(t: test.TestContext) {
-  const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});
-  t.after(async ()=>{
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    const exited=once(child,"exit"); child.kill("SIGKILL"); await exited;
-  });
-  await once(child,"spawn");
-  const signal=async (value:"SIGSTOP" | "SIGCONT")=>{
-    child.kill(value);
-    for (let i=0; ["T","t"].includes(processInfo(child.pid!)?.state || "") !== (value === "SIGSTOP"); i++) {
-      assert.ok(i<200,`child should respond to ${value}`); await delay(10);
-    }
-  };
-  return {pid:child.pid!,signal};
-}
 
 // Stop-state detection and these real job-control regressions require Linux /proc.
 for (const stopped of ["runtime", "host"] as const) {
@@ -68,32 +49,36 @@ for (const stopped of ["runtime", "host"] as const) {
 }
 
 for (const stopped of ["runtime", "host"] as const) {
-  for (const naming of ["automatic", "explicit same", "explicit different"] as const) {
-    test(`stopped ${stopped} releases presence and fences resumed owner (${naming})`, {skip:process.platform !== "linux"}, async t=>{
+  for (const kind of ["claude","codex","pi"]) for (const naming of ["automatic", "explicit same", "explicit different"] as const) {
+    test(`stopped ${kind} ${stopped} releases presence and fences resumed owner (${naming})`, {skip:process.platform !== "linux"}, async t=>{
       const {a,b}=fixture(t);
       const child=await stoppableChild(t);
       const session=randomUUID();
-      const old=a.register({kind:"claude",session_id:session,
+      const old=a.register({kind,session_id:session,
         ...(stopped === "runtime" ? {pid:child.pid} : {host_pid:child.pid}),
         ...(naming !== "automatic" ? {name:"old-owner"} : {})});
-      assert.throws(()=>b.register({kind:"claude",session_id:session}),error=>{
+      assert.throws(()=>b.register({kind,session_id:session}),error=>{
         assert.ok(code("SESSION_IN_USE")(error));
         assert.match((error as Error).message,/pid=\d+, state=\w/);
         assert.ok((error as Error).message.includes(`host_pid=${old.host_pid ?? "unknown"}`));
         assert.ok((error as Error).message.includes(`last_seen=${new Date(old.last_seen).toISOString()}`));
         return true;
       });
+      const oldLease=a.leaseClaim(old,["takeover/**"]);
       await child.signal("SIGSTOP");
       assert.equal(b.peers().find(p=>p.name===old.name)?.online,false);
-      const next=b.register({kind:"claude",session_id:session,
+      const next=b.register({kind,session_id:session,
         ...(naming === "explicit different" ? {name:"new-owner"} : naming === "explicit same" ? {name:old.name} : {})});
       assert.equal(next.name===old.name,naming !== "explicit different");
+      assert.ok(!a.leaseList().some(l=>l.id===oldLease.id),"Takeover releases the old runtime leases");
+      const newLease=b.leaseClaim(next,["takeover/**"]);
       await child.signal("SIGCONT");
       assert.throws(()=>a.touch(old),code("SESSION_CHANGED"));
       assert.throws(()=>a.send(old,{to:"sender",text:"stale",idempotency_key:"stale"}),code("SESSION_CHANGED"));
       a.closeAgent(old);
       b.touch(next);
       assert.equal(b.agent(next.name)?.online,1);
+      assert.ok(b.leaseList().some(l=>l.id===newLease.id));
     });
   }
 }
@@ -114,6 +99,59 @@ for (const stopped of ["runtime", "host"] as const) {
     assert.equal(b.agent(next.name)?.session_id,session);
   });
 }
+
+for (const kind of ["claude","codex","pi"]) {
+  test(`${kind} source binding claims a stopped owner transactionally`,{skip:process.platform !== "linux"},async t=>{
+    const {a,b}=fixture(t),child=await stoppableChild(t),session=randomUUID();
+    const old=a.register({kind,session_id:session,pid:child.pid});
+    const next=b.register({kind,session_id:session,session_source:"unbound"});
+    await child.signal("SIGSTOP");
+    b.setSessionSource(next,"hook");
+    await child.signal("SIGCONT");
+    assert.throws(()=>a.touch(old),code("SESSION_CHANGED"));
+    b.touch(next);assert.equal(b.publicAgent(b.agent(next.name)!).session_binding.state,"bound");
+  });
+
+  test(`${kind} failed insertion rolls back an already revoked owner and its resources`,{skip:process.platform !== "linux"},async t=>{
+    const {a,b,sender}=fixture(t),child=await stoppableChild(t),session=randomUUID();
+    const old=a.register({name:"old-owner",kind,session_id:session,pid:child.pid});
+    const lease=a.leaseClaim(old,["rollback/**"]);
+    if (kind === "claude") a.claimWatch(session,"claude-monitor","old-watch");
+    if (kind === "codex") {
+      const mail=a.send(sender,{to:old.name,text:"private",idempotency_key:"rollback"}).message;
+      a.beginCodexWake(old,[mail],()=>"wake");
+    }
+    b.db.exec(`CREATE TEMP TRIGGER reject_successor BEFORE INSERT ON agents WHEN NEW.name='rejected'
+      BEGIN SELECT CASE WHEN (SELECT online FROM agents WHERE name='old-owner')=0
+      THEN RAISE(ABORT,'failure after takeover') ELSE RAISE(ABORT,'takeover did not run') END; END;`);
+    await child.signal("SIGSTOP");
+    assert.throws(()=>b.register({name:"rejected",kind,session_id:session}),/failure after takeover/);
+    assert.equal(a.agent(old.name)?.runtime_id,old.runtime_id);assert.equal(a.agent(old.name)?.online,1);
+    assert.ok(a.leaseList().some(l=>l.id===lease.id));
+    if (kind === "claude") assert.equal(a.ownsWatch(session,"old-watch"),true);
+    if (kind === "codex") assert.equal(a.codexWake(old)?.agent_name,old.name);
+    await child.signal("SIGCONT");a.touch(old);
+  });
+}
+
+test("a stopped role is unavailable but remains reserved against another session and CLI rename",{skip:process.platform !== "linux"},async t=>{
+  const {a,b,sender,receiver}=fixture(t),child=await stoppableChild(t);
+  const old=a.register({name:"reviewer",kind:"claude",session_id:randomUUID(),host_pid:child.pid});
+  a.send(old,{to:receiver.name,text:"prior",idempotency_key:"prior"});
+  await child.signal("SIGSTOP");
+  assert.equal(b.peers().find(p=>p.name===old.name)?.online,false);
+  assert.throws(()=>b.register({name:old.name,kind:"claude",session_id:randomUUID()}),error=>{
+    assert.ok(code("NAME_IN_USE")(error));
+    assert.match((error as Error).message,/reserved by a stopped session/);
+    assert.ok((error as Error).message.includes(`host_pid=${child.pid}`));return true;
+  });
+  assert.throws(()=>b.renameAgent(b.cliActor(old.name),"changed",true),/reserved by a stopped session/);
+  assert.ok(!b.renameAgent(receiver,"hq").notified.includes(old.name));
+  assert.equal(a.agent(old.name)?.runtime_id,old.runtime_id);
+  assert.deepEqual(a.pendingNotices(old,"test"),[]);
+  await child.signal("SIGCONT");a.touch(old);
+  a.send(old,{to:sender.name,text:"resumed",idempotency_key:"resumed"});
+});
 
 test("durable send, full UUID replies, atomic ACK and idempotency",async t=>{
   const {a,b,sender,receiver} = fixture(t);
