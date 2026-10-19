@@ -315,6 +315,10 @@ Messages stay in their named inbox. The same bound session can recover its autom
 
 Names are unique among online participants. Explicit collisions fail with `NAME_IN_USE`; automatic names use unclaimed suffixes or recover the same offline bound session. A duplicate live host session fails with `SESSION_IN_USE`. Presence uses the MCP PID and process start time, not a heartbeat timeout. EOF/SIGTERM mark the process offline and release its leases. SIGKILL is detected on the next presence scan; crashed leases expire by TTL. A registered live but idle process is still online.
 
+On Linux, a stopped MCP or host (`T`/`t` in `/proc`) is reported offline. Listing peers or registering an unrelated session preserves its ownership: after `SIGCONT` or `fg`, it can continue normally. Only a successful claim for the same kind and host session revokes the stopped owner's runtime identity. After that takeover, the old MCP must reconnect; resuming it cannot affect the replacement. A failed claim rolls back any ownership changes. `SESSION_IN_USE` reports the owner's PID, process state, host PID/state and last activity as an ISO timestamp.
+
+Stop detection and takeover currently require Linux `/proc`; macOS and other platforms retain their existing liveness checks. Tracing stops (`t`, including debugger pauses) intentionally follow the same rule as job-control stops (`T`): observation preserves ownership, but a new claim for that same session can take over.
+
 ## SQLite and maintenance
 
 - Workspace key: SHA-256 of the real Git root, or real cwd outside Git. Subdirectories of one checkout share a mailbox; different worktrees have separate paths and mailboxes.

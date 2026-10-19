@@ -24,7 +24,9 @@ export function isProcessAlive(pid: number | null, start: string | null): boolea
   return !!info && info.state !== "Z" && info.state !== "X" && (!start || info.start === start);
 }
 
-// Stopped processes still exist, but cannot service a session or retain presence.
+// Linux /proc only: other platforms do not currently expose state here.
+// Include tracing stops (t) intentionally: both T and t cannot service a session.
+// A stop changes reported presence; ownership is revoked only on an actual takeover.
 export function isProcessStopped(pid: number | null, start: string | null): boolean {
   if (!pid) return false;
   const info = processInfo(pid);

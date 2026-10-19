@@ -201,13 +201,12 @@ export class Store {
 
   private cleanPresence(): void {
     for (const row of this.all<Agent>("SELECT * FROM agents WHERE online=1")) {
-      const stoppedRuntime = isProcessStopped(row.pid, row.proc_start);
-      const stoppedHost = isProcessStopped(row.host_pid, row.host_start);
-      if (stoppedRuntime || stoppedHost) {
-        // Fence a resumed runtime even when the replacement chooses another name.
-        this.run("UPDATE agents SET online=0,runtime_id=? WHERE name=? AND runtime_id=?", randomUUID(), row.name, row.runtime_id);
-      } else if (!isProcessAlive(row.pid, row.proc_start)) this.run("UPDATE agents SET online=0 WHERE name=? AND runtime_id=?", row.name, row.runtime_id);
+      if (!isProcessAlive(row.pid, row.proc_start)) this.run("UPDATE agents SET online=0 WHERE name=? AND runtime_id=?", row.name, row.runtime_id);
     }
+  }
+
+  private isStopped(a: Agent): boolean {
+    return isProcessStopped(a.pid,a.proc_start) || isProcessStopped(a.host_pid,a.host_start);
   }
 
   peers() {
@@ -218,7 +217,7 @@ export class Store {
   publicAgent(a: Agent) {
     const binding = this.get<{naming:string;session_source:string}>("SELECT * FROM agent_bindings WHERE name=?",a.name);
     const source = binding?.session_source || "legacy";
-    return { name: a.name, kind: a.kind, session_id: a.session_id, online: !!a.online,
+    return { name: a.name, kind: a.kind, session_id: a.session_id, online: !!a.online && !this.isStopped(a),
       naming: binding?.naming || "legacy",
       previous_names: this.all<{old_name:string}>("SELECT old_name FROM agent_renames WHERE new_name=? ORDER BY old_name",a.name).map(r=>r.old_name),
       session_binding: { state: hasHostSession(a.kind,a.session_id,source) ? "bound" : "unbound", source },
@@ -227,8 +226,15 @@ export class Store {
   }
 
   private assertSessionAvailable(kind: string, session: string, exceptName = ""): void {
-    const owner = this.get<Agent>("SELECT * FROM agents WHERE kind=? AND session_id=? AND online=1 AND name<>? LIMIT 1",kind,session,exceptName);
-    if (owner) throw new MailError("SESSION_IN_USE",`Host session is already owned by online agent ${owner.name} (pid=${owner.pid}, state=${owner.pid ? processInfo(owner.pid)?.state || "unknown" : "unknown"}, host_pid=${owner.host_pid}, host_state=${owner.host_pid ? processInfo(owner.host_pid)?.state || "unknown" : "unknown"}, last_seen=${owner.last_seen}); close that MCP connection before reconnecting.`);
+    for (const owner of this.all<Agent>("SELECT * FROM agents WHERE kind=? AND session_id=? AND online=1 AND name<>?",kind,session,exceptName)) {
+      if (this.isStopped(owner)) {
+        // Callers claim this session in the same transaction. Fence only on takeover,
+        // so listing peers or registering an unrelated session never revokes an owner.
+        this.run("UPDATE agents SET online=0,runtime_id=? WHERE name=? AND runtime_id=?",randomUUID(),owner.name,owner.runtime_id);
+        continue;
+      }
+      throw new MailError("SESSION_IN_USE",`Host session is already owned by online agent ${owner.name} (pid=${owner.pid ?? "unknown"}, state=${owner.pid ? processInfo(owner.pid)?.state || "unknown" : "unknown"}, host_pid=${owner.host_pid ?? "unknown"}, host_state=${owner.host_pid ? processInfo(owner.host_pid)?.state || "unknown" : "unknown"}, last_seen=${new Date(owner.last_seen).toISOString()}); close that MCP connection before reconnecting.`);
+    }
   }
 
   register(input: { name?: string; kind: string; session_id: string; pid?: number; host_pid?: number; wake?: string; session_source?: string; replace?: Agent }): Agent {
@@ -251,7 +257,10 @@ export class Store {
       let name = input.name || input.kind;
       const reserved = input.name ? this.renamedTo(name) : undefined;
       if (reserved) throw new MailError("NAME_RESERVED",`${name} was renamed to ${reserved}; update PEERLETTER_NAME/--name.`,{renamed_to:reserved});
-      if (input.name && this.agent(name)?.online) throw new MailError("NAME_IN_USE", `Agent ${name} is already online; choose a different name.`);
+      const named = input.name ? this.agent(name) : undefined;
+      if (named?.online && !(bound && named.kind === input.kind && named.session_id === input.session_id && this.isStopped(named))) {
+        throw new MailError("NAME_IN_USE", `Agent ${name} is already online; choose a different name.`);
+      }
       if (bound) this.assertSessionAvailable(input.kind,input.session_id);
       if (!input.name) {
         const previous = bound ? this.get<Agent>(`SELECT a.* FROM agents a LEFT JOIN agent_bindings b ON b.name=a.name
