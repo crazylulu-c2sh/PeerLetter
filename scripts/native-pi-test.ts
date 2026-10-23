@@ -10,7 +10,7 @@ import { applyGlobal } from "./global-install.ts";
 import { Store } from "../src/store.ts";
 import type { Agent } from "../src/store.ts";
 import { resolveProject } from "../src/project.ts";
-// Installed Pi 0.99.2 CLI, actual global resource discovery and MCP. Every model
+// Installed Pi CLI from package.json, actual global resource discovery and MCP. Every model
 // response is loopback; project settings are deliberately untrusted.
 const checkout=fileURLToPath(new URL("../",import.meta.url)),root=fs.mkdtempSync(path.join(os.tmpdir(),"peerletter-native-pi-"));
 const home=path.join(root,"home"),project=path.join(root,"project"),agentDir=path.join(home,".pi/agent"),state=path.join(root,"state");
@@ -49,7 +49,8 @@ fs.writeFileSync(path.join(agentDir,"models.json"),JSON.stringify({providers:{fi
   api:"openai-completions",apiKey:"fixture-dummy",models:[{id:"fixture",contextWindow:32768,maxTokens:1024}]}}}));
 const env:NodeJS.ProcessEnv={...process.env,HOME:home,PI_CODING_AGENT_DIR:agentDir,PEERLETTER_STATE_DIR:state,PI_OFFLINE:"1",PI_TELEMETRY:"0"};
 for (const key of Object.keys(env)) if (/API_KEY|AUTH_TOKEN|OAUTH_TOKEN|PEERLETTER_(PROJECT|NAME|SESSION_ID|WAKE)$/.test(key)) delete env[key];
-const binary=path.join(checkout,"node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
+const piPackage=path.join(checkout,"node_modules/@earendil-works/pi-coding-agent");
+const binary=path.join(piPackage,"dist/cli.js"),piVersion=JSON.parse(fs.readFileSync(path.join(piPackage,"package.json"),"utf8")).version;
 const child=spawn(process.execPath,[binary,"--mode","rpc","--no-session","--no-approve","--no-context-files","--no-builtin-tools","--provider","fixture","--model","fixture","--thinking","off","--offline"],{cwd:project,env,stdio:["pipe","pipe","pipe"]});
 let errors="",buffer="";const events:any[]=[];
 child.stdout.on("data",bytes=>{
@@ -72,7 +73,7 @@ try {
   await until(()=>requests === 3 && sawNotice && store.status(sender,mail.id).state === "notified","Native Pi idle wake");
   await new Promise(r=>setTimeout(r,1000));assert.equal(requests,3);assert.equal(store.status(sender,mail.id).acknowledged_at,null);
   assert.ok(!errors.includes("UNTRUSTED-PROJECT-EXTENSION-LOADED"));
-  console.log(JSON.stringify({passed:true,client:"installed Pi CLI 0.99.2 RPC",global_setup:true,project_trusted:false,unused_startup_joined:false,first_call_bound:true,
+  console.log(JSON.stringify({passed:true,client:`installed Pi CLI ${piVersion} RPC`,global_setup:true,project_trusted:false,unused_startup_joined:false,first_call_bound:true,
     idle_native_wakes:1,provider_requests:requests,external_model_requests:0}));
 } finally {
   child.stdin.end();await Promise.race([new Promise(r=>child.once("exit",r)),new Promise(r=>setTimeout(r,2000))]);

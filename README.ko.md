@@ -474,7 +474,7 @@ Pi를 다시 불러오거나 새 세션을 시작하세요.
 - 확장은 받은편지함을 감시하다가 본문 없는 `pi.sendMessage(..., {triggerTurn:true, deliverAs:'steer'})`를 보냅니다.
 - 수동 정지, 중단, 제공자 오류, UI 대화상자, compaction 중에는 주입을 막습니다. 중단은 실행의 abort signal과 종료 결과로 판단하며, 터미널 입력은 읽지 않습니다.
 - `/peerletter pause`, `/peerletter resume`, `/peerletter status`로 제어하거나 확인합니다. 새 명시적 사용자 입력은 정지를 풉니다.
-- 설치된 Pi 0.99.2의 확장 API를 대상으로 합니다. [Pi 확장 문서](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)를 참고하세요.
+- `package.json`에 고정된 Pi(`@earendil-works/pi-coding-agent`) 버전의 확장 API를 대상으로 합니다. [Pi 확장 문서](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)를 참고하세요.
 
 ### 재시작과 이전 메일
 
@@ -590,7 +590,7 @@ Linux에서는 저장된 프로세스 시작 시각과 일치하는 작업 제�
 |---|---|---|
 | `pnpm run test:native-codex` | 설치된 Codex | 격리 설정에서 실제 `codex exec`를 가짜 Responses 제공자로 실행하고, MCP 환경에서 `CODEX_THREAD_ID`를 뺀 상태로 기본 메타데이터가 Codex가 내보내는 것과 같은 thread ID로 연결되는지 |
 | `pnpm run test:native-codex-queue` | 설치된 Codex, Python 3, Unix PTY | 격리된 앱서버와 실제 대화형 TUI를 가짜 Responses 제공자로 띄워, 바쁜 턴에서 받고 ACK한 여러 메일은 추가 턴 0건, 읽지 않은 메일은 턴이 끝난 뒤 1회, 쉬는 상태 메일은 1회 깨우는지 |
-| `pnpm run test:native-pi` | 설치된 Pi 0.99.2 SDK·CLI | 격리된 전역 설치·RPC·가짜 chat 제공자로 프로젝트 신뢰 없이, 새 세션이 첫 도구 호출 전에는 참여하지 않고 이후 idle 메일 깨우기 1회 |
+| `pnpm run test:native-pi` | `package.json`으로 설치된 Pi SDK·CLI | 격리된 전역 설치·RPC·가짜 chat 제공자로 프로젝트 신뢰 없이, 새 세션이 첫 도구 호출 전에는 참여하지 않고 이후 idle 메일 깨우기 1회 |
 | `pnpm run test:native-global-setup` | 설치된 Claude Code, pnpm 다운로드를 위한 네트워크 | 빈 HOME·의존성 없는 임시 체크아웃에서 실제 `setup all`, 사용자 플러그인 범위·SQLite·읽기 쉬운 보고서 확인, 로컬 bare remote에서 `setup update`로 갱신한 뒤 전체 삭제 |
 | `pnpm run test:native-claude` | 설치된 Claude Code, Python 3, Unix PTY | 임시 프로젝트에 **async-rewake**를 설치하고 "사용함"으로 기록한 세션을 띄워, 도구 호출 없이 참여하고 메일만으로 본문 없는 알림이 담긴 다음 대화형 모델 턴이 시작되는지 |
 
@@ -610,7 +610,7 @@ Linux에서는 저장된 프로세스 시작 시각과 일치하는 작업 제�
 
 **전역 설치·세션 전환 테스트**
 
-`test:native-pi`는 실제 Pi 0.99.2 CLI를 RPC 모드로 시작합니다. 격리된 사용자 전역 설치, 로컬 가짜 제공자, 신뢰하지 않은 프로젝트 리소스를 사용하며, 새 세션이 첫 PeerLetter 도구 호출 전에는 참여하지 않는지와 메일 본문·ACK 없는 idle 깨우기 1회를 확인합니다. 외부 모델을 호출하지 않으며 CI에서도 실행합니다.
+`test:native-pi`는 `package.json`으로 설치된 실제 Pi CLI를 RPC 모드로 시작합니다. 격리된 사용자 전역 설치, 로컬 가짜 제공자, 신뢰하지 않은 프로젝트 리소스를 사용하며, 새 세션이 첫 PeerLetter 도구 호출 전에는 참여하지 않는지와 메일 본문·ACK 없는 idle 깨우기 1회를 확인합니다. 외부 모델을 호출하지 않으며 CI에서도 실행합니다.
 
 임시 HOME에서 세 호스트 설치, 다른 설정과 이후 변경 보존, 다른 설정·수정된 관리 블록 거부, 프로젝트 신뢰 없이 실제 Pi 사용자 확장·skill 로드, 호출한 Codex thread의 Git 루트 선택을 검증합니다. Claude 전환 픽스처는 실제 ancestor 프로세스·MCP·watch를 실행하고 문서화된 registry·훅 변경을 재현합니다. `/clear`·`/resume`, 이전 환경 변수, 도구 재호출 없이 등록, 사용하지 않은 세션에서 떠나기와 사용한 세션에 다시 참여, 자동 이름 복구, pause·메일·lease 격리, 명시 세션 고정, 실패 시 rollback을 확인합니다. 모든 호스트·제공자가 Monitor를 제공한다는 증거는 아닙니다.
 
