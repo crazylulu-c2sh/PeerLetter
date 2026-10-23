@@ -14,6 +14,8 @@ import { locateProject, resolveProject } from "../src/project.ts";
 import { watchMail } from "../src/watch.ts";
 import { claudeWakeFile } from "../src/claude.ts";
 import { installation,writeWithBackup } from "../scripts/install.ts";
+import { stoppableChild } from "./process-fixture.ts";
+import { processInfo } from "../src/process.ts";
 
 const repo=fileURLToPath(new URL("../",import.meta.url));
 function fixture(t:test.TestContext) {
@@ -33,6 +35,41 @@ async function mcp(project:string,state:string,session:string,wake="claude-monit
   const sdk=new Client({name:"claude-code",version:"test"});
   await sdk.connect(transport);return sdk;
 }
+
+test("stopped watcher preserves its token until session takeover, then the new host can wake",{skip:process.platform !== "linux"},async t=>{
+  const {project,state,store,session}=fixture(t),host=await stoppableChild(t),watcher=await stoppableChild(t);
+  const old=store.register({name:"old-owner",kind:"claude",session_id:session,host_pid:host.pid,wake:"claude-monitor"});
+  store.run("INSERT INTO watch_owners VALUES(?,?,?,?,?,?)",session,"old-watch","claude-monitor",watcher.pid,processInfo(watcher.pid)!.start,Date.now());
+  await host.signal("SIGSTOP");await watcher.signal("SIGSTOP");
+  assert.equal(store.watchStatus(session).online,false);
+  assert.equal(store.ownsWatch(session,"old-watch"),true,"Observation must preserve a resumable watch token");
+  assert.equal(store.agentForSession(session,"claude"),undefined,"Stopped recipients cannot be notified");
+  const next=store.register({name:"new-owner",kind:"claude",session_id:session,wake:"claude-monitor"});
+  assert.equal(store.ownsWatch(session,"old-watch"),false);
+  const sender=store.register({kind:"codex",session_id:randomUUID()});
+  const mail=store.send(sender,{to:next.name,text:"private",idempotency_key:"new"}).message;
+  const lines:string[]=[];
+  assert.equal(await watchMail({project,state,session,once:true,timeoutMs:500,pollMs:10,emit:async line=>{lines.push(line);}}),true);
+  assert.equal(lines.length,1);assert.equal(store.status(sender,mail.id).state,"notified");
+  await host.signal("SIGCONT");await watcher.signal("SIGCONT");
+  assert.throws(()=>store.touch(old),/no longer owns/);
+  assert.equal(store.claimWatch(session,"claude-monitor","new-watch"),true);
+  store.releaseWatch(session,"old-watch");assert.equal(store.ownsWatch(session,"new-watch"),true);
+});
+
+test("watch defers delivery while its MCP is stopped and resumes without takeover",{skip:process.platform !== "linux"},async t=>{
+  const {project,state,store,session}=fixture(t),child=await stoppableChild(t);
+  const actor=store.register({kind:"claude",session_id:session,pid:child.pid,wake:"claude-monitor"});
+  const sender=store.register({kind:"codex",session_id:randomUUID()});
+  const mail=store.send(sender,{to:actor.name,text:"private",idempotency_key:"deferred"}).message;
+  const lines:string[]=[];
+  await child.signal("SIGSTOP");
+  assert.equal(await watchMail({project,state,session,once:true,timeoutMs:40,pollMs:10,emit:async line=>{lines.push(line);},diagnostic:()=>{}}),false);
+  assert.equal(lines.length,0);assert.equal(store.status(sender,mail.id).state,"accepted");
+  await child.signal("SIGCONT");
+  assert.equal(await watchMail({project,state,session,once:true,timeoutMs:500,pollMs:10,emit:async line=>{lines.push(line);}}),true);
+  assert.equal(lines.length,1);store.touch(actor);
+});
 
 test("monitor waits for actual MCP startup, emits once without body or ACK, and survives reconnect",{timeout:15000},async t=>{
   const {project,state,store,session}=fixture(t),stopped=new AbortController(),lines:string[]=[];

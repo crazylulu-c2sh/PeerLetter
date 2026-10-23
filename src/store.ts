@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { MailError, boundedInt, validName, validUuid, validSession } from "./errors.ts";
-import { isProcessAlive, processInfo } from "./process.ts";
+import { describeProcess, isProcessAlive, processInfo, processStatus } from "./process.ts";
+import type { ProcessStatus } from "./process.ts";
 import type { Project } from "./project.ts";
 
 export interface Actor { name: string; session_id: string; runtime_id?: string }
@@ -31,6 +32,7 @@ export interface CodexWake {
   queue_id: string | null; message_ids: string; input: string; created_at: number;
 }
 type SqlValue = string | number | null;
+type ProcessSamples = Map<string,ProcessStatus>;
 
 export function hasHostSession(kind: string, session: string, source = "configured"): boolean {
   if (source === "unbound" || kind === "cli" || /^(runtime|cli):/.test(session)) return false;
@@ -173,9 +175,12 @@ export class Store {
       to = to === current.kind || to.startsWith(current.kind + "-") ? to : `${current.kind}-${to}`;
       validName(to);
       if (to === actor.name) return {agent:current,from:actor.name,requested,notified:[]};
-      if (offlineOnly && current.online) throw new MailError("NAME_IN_USE","Mailbox is online; use peerletter_rename in that session.");
+      if (offlineOnly && current.online) throw this.nameInUse(current);
       const target = this.agent(to);
-      if (target) throw new MailError(target.online ? "NAME_IN_USE" : "NAME_TAKEN",`Mailbox ${to} already exists; mailboxes cannot be merged.`);
+      if (target) {
+        if (target.online) throw this.nameInUse(target);
+        throw new MailError("NAME_TAKEN",`Mailbox ${to} already exists; mailboxes cannot be merged.`);
+      }
       const reserved = this.renamedTo(to);
       if (reserved && reserved !== actor.name) throw new MailError("NAME_RESERVED",`${to} was renamed to ${reserved}.`,{renamed_to:reserved});
       if (reserved) this.run("DELETE FROM agent_renames WHERE old_name=?",to);
@@ -186,9 +191,9 @@ export class Store {
       }
       this.run("UPDATE agent_renames SET new_name=? WHERE new_name=?",to,old);
       this.run("INSERT OR REPLACE INTO agent_renames VALUES(?,?,?)",old,to,Date.now());
-      const notified = this.all<{name:string}>(`SELECT DISTINCT a.name FROM messages m
+      const notified = this.all<Agent>(`SELECT DISTINCT a.* FROM messages m
         JOIN agents a ON a.name=m.from_name AND a.session_id=m.from_session
-        WHERE m.to_name=? AND a.online=1 AND a.name<>? ORDER BY a.name`,to,to).map(a=>a.name);
+        WHERE m.to_name=? AND a.online=1 AND a.name<>? ORDER BY a.name`,to,to).filter(a=>this.isOnline(a)).map(a=>a.name);
       for (const name of notified) this.insertMessage({name:to,session_id:actor.session_id}, {
         to:name, text:`PeerLetter rename notice: ${old} is now ${to}. Send future mail to ${to}; mail to ${old} returns PEER_RENAMED. No reply needed.`,
         idempotency_key:`peerletter-rename:${randomUUID()}`,
@@ -199,10 +204,34 @@ export class Store {
     return renamed;
   }
 
-  private cleanPresence(): void {
+  private cleanPresence(samples: ProcessSamples = new Map()): void {
     for (const row of this.all<Agent>("SELECT * FROM agents WHERE online=1")) {
-      if (!isProcessAlive(row.pid, row.proc_start)) this.run("UPDATE agents SET online=0 WHERE name=? AND runtime_id=?", row.name, row.runtime_id);
+      if (!this.presence(row,samples).runtime.alive) this.run("UPDATE agents SET online=0 WHERE name=? AND runtime_id=?", row.name, row.runtime_id);
     }
+  }
+
+  private presence(a: Agent, samples: ProcessSamples = new Map()) {
+    const sample = (pid:number|null,start:string|null) => {
+      const key=JSON.stringify([pid,start]);
+      let status=samples.get(key);
+      if (!status) { status=processStatus(pid,start); samples.set(key,status); }
+      return status;
+    };
+    const runtime=sample(a.pid,a.proc_start),host=sample(a.host_pid,a.host_start);
+    const stopped=runtime.stopped || host.stopped;
+    return {runtime,host,stopped,online:!!a.online && runtime.alive && !stopped};
+  }
+
+  isOnline(a: Agent): boolean {
+    return this.presence(a).online;
+  }
+
+  private nameInUse(a: Agent, samples: ProcessSamples = new Map()): MailError {
+    const presence=this.presence(a,samples);
+    const reason=presence.stopped
+      ? `reserved by a stopped session (${describeProcess(presence.runtime)}, ${describeProcess(presence.host,"host_")})`
+      : "already online";
+    return new MailError("NAME_IN_USE",`Agent ${a.name} is ${reason}; choose a different name.`);
   }
 
   peers() {
@@ -213,7 +242,7 @@ export class Store {
   publicAgent(a: Agent) {
     const binding = this.get<{naming:string;session_source:string}>("SELECT * FROM agent_bindings WHERE name=?",a.name);
     const source = binding?.session_source || "legacy";
-    return { name: a.name, kind: a.kind, session_id: a.session_id, online: !!a.online,
+    return { name: a.name, kind: a.kind, session_id: a.session_id, online: this.isOnline(a),
       naming: binding?.naming || "legacy",
       previous_names: this.all<{old_name:string}>("SELECT old_name FROM agent_renames WHERE new_name=? ORDER BY old_name",a.name).map(r=>r.old_name),
       session_binding: { state: hasHostSession(a.kind,a.session_id,source) ? "bound" : "unbound", source },
@@ -221,9 +250,26 @@ export class Store {
       delivery_gate: this.gate(a.session_id) };
   }
 
-  private assertSessionAvailable(kind: string, session: string, exceptName = ""): void {
-    const owner = this.get<Agent>("SELECT * FROM agents WHERE kind=? AND session_id=? AND online=1 AND name<>? LIMIT 1",kind,session,exceptName);
-    if (owner) throw new MailError("SESSION_IN_USE",`Host session is already owned by online agent ${owner.name}; close that MCP connection before reconnecting.`);
+  private claimSession(kind: string, session: string, exceptName = "", samples: ProcessSamples = new Map(), requestedName = ""): void {
+    if (!this.db.isTransaction) throw new Error("Session claims require a transaction.");
+    for (const owner of this.all<Agent>("SELECT * FROM agents WHERE kind=? AND session_id=? AND online=1 AND name<>?",kind,session,exceptName)) {
+      const presence=this.presence(owner,samples);
+      if (presence.stopped) {
+        // Callers claim this session in the same transaction. Fence only on takeover,
+        // so listing peers or registering an unrelated session never revokes an owner.
+        this.run("UPDATE agents SET online=0,runtime_id=? WHERE name=? AND runtime_id=?",randomUUID(),owner.name,owner.runtime_id);
+        this.run("DELETE FROM leases WHERE owner=? AND owner_session=?",owner.name,owner.session_id);
+        if (kind === "claude") this.run("DELETE FROM watch_owners WHERE session_id=?",session);
+        continue;
+      }
+      if (owner.name === requestedName) throw this.nameInUse(owner,samples);
+      throw new MailError("SESSION_IN_USE",`Host session is already owned by online agent ${owner.name} (${describeProcess(presence.runtime)}, ${describeProcess(presence.host,"host_")}, last_seen=${new Date(owner.last_seen).toISOString()}); close that MCP connection before reconnecting.`);
+    }
+  }
+
+  private adoptCodexWake(kind: string, name: string, session: string): void {
+    // Retain the external queue ID and input so the successor can reconcile it safely.
+    if (kind === "codex") this.run("UPDATE codex_wakes SET agent_name=? WHERE session_id=?",name,session);
   }
 
   register(input: { name?: string; kind: string; session_id: string; pid?: number; host_pid?: number; wake?: string; session_source?: string; replace?: Agent }): Agent {
@@ -231,7 +277,8 @@ export class Store {
     validName(input.kind);
     validSession(input.session_id);
     return this.transaction(() => {
-      this.cleanPresence();
+      const samples: ProcessSamples = new Map();
+      this.cleanPresence(samples);
       if (input.replace) {
         const old=this.assertActor(input.replace);
         if (old.kind !== "claude" || input.kind !== "claude" || !old.host_pid
@@ -246,8 +293,11 @@ export class Store {
       let name = input.name || input.kind;
       const reserved = input.name ? this.renamedTo(name) : undefined;
       if (reserved) throw new MailError("NAME_RESERVED",`${name} was renamed to ${reserved}; update PEERLETTER_NAME/--name.`,{renamed_to:reserved});
-      if (input.name && this.agent(name)?.online) throw new MailError("NAME_IN_USE", `Agent ${name} is already online; choose a different name.`);
-      if (bound) this.assertSessionAvailable(input.kind,input.session_id);
+      const named = input.name ? this.agent(name) : undefined;
+      if (named?.online && !(bound && named.kind === input.kind && named.session_id === input.session_id)) {
+        throw this.nameInUse(named,samples);
+      }
+      if (bound) this.claimSession(input.kind,input.session_id,"",samples,input.name);
       if (!input.name) {
         const previous = bound ? this.get<Agent>(`SELECT a.* FROM agents a LEFT JOIN agent_bindings b ON b.name=a.name
           WHERE a.kind=? AND a.session_id=? AND a.online=0 AND COALESCE(b.naming,'legacy')<>'explicit'
@@ -270,6 +320,7 @@ export class Store {
       this.run(`INSERT INTO agent_bindings VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET
         naming=excluded.naming,session_source=excluded.session_source`,name,input.name ? "explicit" : "automatic",source);
       this.run("INSERT OR IGNORE INTO wake_baselines VALUES(?,?,?)", name,current.session_id,this.maxSequence());
+      if (bound) this.adoptCodexWake(input.kind,name,input.session_id);
       return current;
     });
   }
@@ -357,8 +408,9 @@ export class Store {
   }
 
   agentForSession(session: string, kind?: string): Agent | undefined {
-    return kind ? this.get<Agent>("SELECT * FROM agents WHERE session_id=? AND kind=? AND online=1 ORDER BY last_seen DESC LIMIT 1", session, kind)
-      : this.get<Agent>("SELECT * FROM agents WHERE session_id=? AND online=1 ORDER BY last_seen DESC LIMIT 1", session);
+    const rows = kind ? this.all<Agent>("SELECT * FROM agents WHERE session_id=? AND kind=? AND online=1 ORDER BY last_seen DESC", session, kind)
+      : this.all<Agent>("SELECT * FROM agents WHERE session_id=? AND online=1 ORDER BY last_seen DESC", session);
+    return rows.find(a=>this.isOnline(a));
   }
 
   updateSession(actor: Actor, session: string, preserveRuntimeState = false, source = "configured"): void {
@@ -366,7 +418,10 @@ export class Store {
     this.transaction(() => {
       const currentActor = this.assertActor(actor);
       this.cleanPresence();
-      if (hasHostSession(currentActor.kind,session,source)) this.assertSessionAvailable(currentActor.kind,session,actor.name);
+      if (hasHostSession(currentActor.kind,session,source)) {
+        this.claimSession(currentActor.kind,session,actor.name);
+        this.adoptCodexWake(currentActor.kind,actor.name,session);
+      }
       this.run("UPDATE agents SET session_id=? WHERE name=? AND runtime_id=?", session, actor.name, actor.runtime_id || "");
       this.run("UPDATE agent_bindings SET session_source=? WHERE name=?",source,actor.name);
       this.run("INSERT OR IGNORE INTO wake_baselines VALUES(?,?,?)",actor.name,session,
@@ -385,7 +440,10 @@ export class Store {
     this.transaction(() => {
       const current = this.assertActor(actor);
       this.cleanPresence();
-      if (hasHostSession(current.kind,actor.session_id,source)) this.assertSessionAvailable(current.kind,actor.session_id,actor.name);
+      if (hasHostSession(current.kind,actor.session_id,source)) {
+        this.claimSession(current.kind,actor.session_id,actor.name);
+        this.adoptCodexWake(current.kind,actor.name,actor.session_id);
+      }
       this.run("UPDATE agent_bindings SET session_source=? WHERE name=?",source,actor.name);
     });
   }
@@ -395,12 +453,15 @@ export class Store {
     this.run("UPDATE agents SET wake=?,wake_error=? WHERE name=?", mode, error?.slice(0,500) ?? null, actor.name);
   }
 
-  // Serialize ownership without stale filesystem-lock races. Never steal a live watcher.
+  // A watch claim can replace a stopped watcher; observations never change its token.
   claimWatch(session: string, sink: string, token: string): boolean {
     validSession(session);
     return this.transaction(() => {
       const owner = this.get<{token:string;pid:number;proc_start:string|null}>("SELECT * FROM watch_owners WHERE session_id=?",session);
-      if (owner && owner.token !== token && isProcessAlive(owner.pid,owner.proc_start)) return false;
+      if (owner && owner.token !== token) {
+        const status=processStatus(owner.pid,owner.proc_start);
+        if (status.alive && !status.stopped) return false;
+      }
       this.run("INSERT OR REPLACE INTO watch_owners VALUES(?,?,?,?,?,?)",session,token,sink,process.pid,processInfo(process.pid)?.start ?? null,Date.now());
       return true;
     });
@@ -416,7 +477,8 @@ export class Store {
 
   watchStatus(session: string) {
     const owner = this.get<{sink:string;pid:number;proc_start:string|null;started_at:number}>("SELECT * FROM watch_owners WHERE session_id=?",session);
-    return { online:!!owner && isProcessAlive(owner.pid,owner.proc_start), sink:owner?.sink ?? null, started_at:owner?.started_at ?? null };
+    const status=owner ? processStatus(owner.pid,owner.proc_start) : undefined;
+    return { online:!!status?.alive && !status.stopped, sink:owner?.sink ?? null, started_at:owner?.started_at ?? null };
   }
 
   gate(session: string): { pause_reason: string | null; blocked_reasons: string[]; state: string } {
@@ -559,7 +621,7 @@ export class Store {
   dataVersion(): number { return Number(this.get<{ data_version: number }>("PRAGMA data_version")!.data_version); }
 
   pendingNotices(actor: Actor, _sink: string, afterSequence = 0): Mail[] {
-    this.assertActor(actor);
+    if (!this.isOnline(this.assertActor(actor))) return [];
     if (this.gate(actor.session_id).state !== "ready") return [];
     return this.all<Mail>(mailSelect + ` WHERE m.to_name=? AND (m.to_session IS NULL OR m.to_session=?)
       AND d.state IN ('accepted','notified') AND m.seq>?
@@ -606,7 +668,9 @@ export class Store {
       if (!row || row.client_message_id !== client) throw new MailError("WAKE_OWNERSHIP_CHANGED","Codex wake intent changed.");
       if (row.queue_id && row.queue_id !== queue) throw new MailError("WAKE_OWNERSHIP_CHANGED","Codex queue ID changed.");
       this.run("UPDATE codex_wakes SET queue_id=? WHERE session_id=? AND client_message_id=?",queue,actor.session_id,client);
-      this.recordNotified(actor,"codex-queue",JSON.parse(row.message_ids));
+      // After a mailbox-name change, the saved batch can belong to the old inbox.
+      // Keep the external queue identity, but do not notify mail addressed to someone else.
+      this.recordNotified(actor,"codex-queue",this.codexWakeUnread(actor,row).map(m=>m.id));
     });
   }
 

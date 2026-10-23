@@ -103,6 +103,7 @@ export async function watchMail(options: WatchOptions): Promise<boolean> {
           // Revalidate immediately before handing a body-free line to the host.
           if (mail.length && !options.signal?.aborted && Date.now()<deadline
             && store.ownsWatch(session,token) && store.gate(session).state === "ready"
+            && store.isOnline(store.assertActor(actor))
             && store.assertActor(actor).wake === sink
             && (configuredClaudeWake(project.cwd) ?? sink) === sink) {
             await emit(noticeText(mail));

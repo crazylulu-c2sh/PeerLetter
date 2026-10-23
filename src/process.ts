@@ -3,13 +3,13 @@ import * as path from "node:path";
 
 export interface ProcessInfo { pid: number; ppid: number; start: string | null; name: string; cwd?: string; state?: string }
 
-export function processInfo(pid: number): ProcessInfo | undefined {
+export function processInfo(pid: number, includeCwd = true): ProcessInfo | undefined {
   try {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
     const end = stat.lastIndexOf(")");
     const fields = stat.slice(end + 2).split(" ");
     let cwd: string | undefined;
-    try { cwd = fs.readlinkSync(`/proc/${pid}/cwd`); } catch { /* Not always accessible. */ }
+    if (includeCwd) try { cwd = fs.readlinkSync(`/proc/${pid}/cwd`); } catch { /* Not always accessible. */ }
     return { pid, ppid: Number(fields[1]), start: fields[19], name: stat.slice(stat.indexOf("(") + 1, end), cwd, state: fields[0] };
   } catch {
     if (process.platform === "linux") return undefined;
@@ -18,10 +18,30 @@ export function processInfo(pid: number): ProcessInfo | undefined {
   }
 }
 
+export interface ProcessStatus { pid: number | null; state?: string; alive: boolean; stopped: boolean }
+
+export function processStatus(pid: number | null, start: string | null): ProcessStatus {
+  const info = pid ? processInfo(pid,false) : undefined;
+  const alive = !!info && info.state !== "Z" && info.state !== "X" && (!start || info.start === start);
+  // Only a positively identified job-control stop can authorize a takeover.
+  // Tracing stops (t) may last just one syscall; unknown start times cannot rule out PID reuse.
+  const stopped = alive && !!start && info?.start === start && info.state === "T";
+  return {pid,state:info?.state,alive,stopped};
+}
+
 export function isProcessAlive(pid: number | null, start: string | null): boolean {
-  if (!pid) return false;
-  const info = processInfo(pid);
-  return !!info && info.state !== "Z" && info.state !== "X" && (!start || info.start === start);
+  return processStatus(pid,start).alive;
+}
+
+// Linux /proc only. A stop changes availability; only a claim revokes ownership.
+export function isProcessStopped(pid: number | null, start: string | null): boolean {
+  return processStatus(pid,start).stopped;
+}
+
+export function describeProcess(status: ProcessStatus, prefix = ""): string {
+  const states: Record<string,string> = {R:"running",S:"sleeping",D:"waiting",T:"job-control stop",t:"tracing stop",Z:"zombie",X:"dead"};
+  const state = status.state ? `${status.state} (${states[status.state] || "unknown"})` : "unknown";
+  return `${prefix}pid=${status.pid ?? "unknown"}, ${prefix}state=${state}`;
 }
 
 export function ancestors(pid = process.ppid): ProcessInfo[] {
