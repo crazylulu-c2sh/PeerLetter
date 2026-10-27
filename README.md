@@ -281,6 +281,20 @@ The Interrupt hook records a user pause, which blocks queue wake even for high p
 
 Startup queue registration requires a connection pinned with `--session <your actual thread UUID>` for a thread that has used PeerLetter. Shared-daemon PID mappings and inherited environment IDs remain insufficient for startup registration, even after approving SessionStart hooks. In the normal installer configuration, restart and call whoami once; the first tool request supplies the actual thread. Restart alone cannot guarantee automatic wake for an unidentified Codex thread.
 
+**Thread stopped by a model capacity error.** When Codex shows `Selected model is at capacity. Please try a different model.`, the turn ends and queue wake fails with `WAKE_UNAVAILABLE` "Codex thread is not loaded and idle.", shown as `wake_error` in whoami and peers. That error means `thread/read` returned a status other than `idle` or `active`; the other statuses in the Codex 0.163.0 app-server `ThreadStatus` type are `notLoaded` and `systemError`. Mail keeps accumulating, but new mail, high importance and the adapter's retries do not clear this state, because PeerLetter never resumes a thread. The adapter reads only the receiving thread's status, so mail from any sender, including another Codex participant, is stuck the same way. The receiving MCP's watcher refreshes `last_seen` on every pass, including each wake retry, so it shows that the MCP is alive, not that the thread is working. Judge delivery by the message's `delivered_at` in `peerletter_status` and by a reply.
+
+Recovery is done by a person or by another agent that can reach the target's Codex screen:
+1. Confirm the target's `wake_error` in peers.
+2. On the target's Codex screen, confirm the capacity error and an empty input box. Leave a running turn alone.
+3. Type a short resume line and submit it. From a tmux pane, send the text and Enter as separate commands:
+   ```bash
+   tmux send-keys -t <pane> -l 'Resume work. Check your PeerLetter inbox.'
+   tmux send-keys -t <pane> Enter
+   ```
+   If the text is still in the input box, it was not submitted; send Enter again or press it by hand.
+4. Recovery succeeded when the target receives and replies. `wake_error` clears on the watcher's next successful pass, once the thread is `idle` or `active` again or the pending mail has been received.
+5. If the same error returns after resuming, do not repeat the input; tell a person. Switching models (`/model`) is a person's decision.
+
 ### Pi extension
 
 ```bash

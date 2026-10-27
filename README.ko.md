@@ -449,6 +449,25 @@ node ~/dev/PeerLetter/scripts/install.ts --project /path/to/project \
 - 일반 설치 설정에서는 재시작한 뒤 whoami를 한 번 호출하세요. 첫 도구 요청이 실제 thread를 알려 줍니다.
 - 재시작만으로는 식별되지 않은 Codex thread의 자동 깨우기를 보장할 수 없습니다.
 
+**모델 용량 오류로 멈춘 thread**
+- 증상: Codex 화면에 `Selected model is at capacity. Please try a different model.`이 뜨고 턴이 끝나면, 큐 깨우기가 `WAKE_UNAVAILABLE` "Codex thread is not loaded and idle."로 실패하고 whoami·peers의 `wake_error`에 남습니다.
+- 이 오류는 `thread/read`가 `idle`도 `active`도 아닌 상태를 돌려줬다는 뜻입니다. Codex 0.163.0 앱서버의 `ThreadStatus` 타입에서 나머지 상태는 `notLoaded`와 `systemError`입니다.
+- 메일은 받은편지함에 계속 쌓이지만, 새 메일·높은 중요도·장치의 재시도로는 이 상태가 풀리지 않습니다. PeerLetter는 thread를 이어받지 않기 때문입니다.
+- 장치는 받는 thread의 상태만 봅니다. 그래서 다른 Codex 참여자를 포함해 누가 보낸 메일이든 똑같이 멈춥니다.
+- 받는 쪽 MCP의 watch는 확인할 때마다(깨우기 재시도 포함) `last_seen`을 갱신합니다. 이 값은 MCP가 살아 있다는 뜻일 뿐, thread가 일하고 있다는 신호가 아닙니다. 전달 여부는 `peerletter_status`의 `delivered_at`과 회신으로 판단하세요.
+
+복구는 사람이나, 대상 Codex 화면에 접근할 수 있는 다른 에이전트가 합니다.
+1. peers에서 대상의 `wake_error`를 확인합니다.
+2. 대상 Codex 화면에서 용량 오류 문구와 빈 입력창을 확인합니다. 진행 중인 턴이 있으면 건드리지 않습니다.
+3. 입력창에 짧은 재개 문장을 넣고 제출합니다. tmux pane으로 넣을 때는 문장과 Enter를 따로 보냅니다.
+   ```bash
+   tmux send-keys -t <pane> -l '작업 재개. PeerLetter 받은편지함을 확인해줘.'
+   tmux send-keys -t <pane> Enter
+   ```
+   문장이 입력창에 그대로 남아 있으면 제출되지 않은 것입니다. Enter를 다시 보내거나 사람이 누르세요.
+4. 대상이 receive하고 회신하면 복구된 것입니다. thread가 다시 `idle`이나 `active`가 되거나 대기 중이던 메일을 받으면, watch의 다음 정상 확인에서 `wake_error`가 지워집니다.
+5. 재개한 뒤 같은 오류가 다시 나오면 입력을 반복하지 말고 사람에게 알립니다. 다른 모델로 바꾸는 것(`/model`)은 사람이 정합니다.
+
 ### Pi 확장
 
 ```bash
