@@ -19,7 +19,7 @@
     "prepublishOnly": "node -e \"throw new Error('PeerLetter is GitHub-only. Registry publishing is disabled.')\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.32.1",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "ws": "8.22.0",
     "zod": "4.6.7"
   },
